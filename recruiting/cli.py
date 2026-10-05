@@ -1,0 +1,127 @@
+import argparse
+import json
+import sqlite3
+import sys
+
+STAGE_APPLIED = "applied"
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS candidates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL,
+    position TEXT NOT NULL,
+    stage TEXT NOT NULL
+)
+"""
+
+FIELDS = ("id", "name", "email", "position", "stage")
+
+
+def email_is_invalid(email):
+    """邮箱去空白后的校验规则，不合规返回 True。"""
+    if not email:
+        return True
+    if any(ch.isspace() for ch in email):
+        return True
+    if email.count("@") != 1:
+        return True
+    local, _, domain = email.partition("@")
+    if not local or not domain:
+        return True
+    if "." not in domain or domain.startswith(".") or domain.endswith("."):
+        return True
+    return False
+
+
+def connect(db_path):
+    """打开（必要时创建）数据库并确保表结构存在。"""
+    conn = sqlite3.connect(db_path)
+    conn.execute(SCHEMA)
+    conn.commit()
+    return conn
+
+
+def emit_error(errors):
+    print(json.dumps({"errors": errors}, ensure_ascii=False), file=sys.stderr)
+
+
+def cmd_add(conn, args):
+    name = args.name.strip()
+    email = args.email.strip()
+    position = args.position.strip()
+
+    errors = {}
+    if not name:
+        errors["name"] = "required"
+    if email_is_invalid(email):
+        errors["email"] = "invalid"
+    if not position:
+        errors["position"] = "required"
+    if errors:
+        emit_error(errors)
+        return 2
+
+    cursor = conn.execute(
+        "INSERT INTO candidates (name, email, position, stage)"
+        " VALUES (?, ?, ?, ?)",
+        (name, email, position, STAGE_APPLIED),
+    )
+    conn.commit()
+
+    record = {
+        "id": cursor.lastrowid,
+        "name": name,
+        "email": email,
+        "position": position,
+        "stage": STAGE_APPLIED,
+    }
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
+def cmd_list(conn, args):
+    position = args.position.strip()
+    if not position:
+        emit_error({"position": "required"})
+        return 2
+
+    rows = conn.execute(
+        "SELECT id, name, email, position, stage FROM candidates"
+        " WHERE position = ? ORDER BY id ASC",
+        (position,),
+    ).fetchall()
+    records = [dict(zip(FIELDS, row)) for row in rows]
+    print(json.dumps(records, ensure_ascii=False))
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="recruiting")
+    parser.add_argument("--db", required=True, help="SQLite 数据库文件路径")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    add_parser = subparsers.add_parser("add", help="登记候选人")
+    add_parser.add_argument("--name", required=True)
+    add_parser.add_argument("--email", required=True)
+    add_parser.add_argument("--position", required=True)
+    add_parser.set_defaults(handler=cmd_add)
+
+    list_parser = subparsers.add_parser("list", help="按岗位查询候选人")
+    list_parser.add_argument("--position", required=True)
+    list_parser.set_defaults(handler=cmd_list)
+
+    return parser
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    conn = connect(args.db)
+    try:
+        return args.handler(conn, args)
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
