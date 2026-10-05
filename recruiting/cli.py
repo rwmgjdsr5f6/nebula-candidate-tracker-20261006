@@ -4,6 +4,7 @@ import sqlite3
 import sys
 
 STAGE_APPLIED = "applied"
+STAGES = (STAGE_APPLIED, "interviewing", "hired", "rejected")
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS candidates (
@@ -96,6 +97,41 @@ def cmd_list(conn, args):
     return 0
 
 
+def cmd_set_stage(conn, args):
+    raw_id = args.id.strip()
+    stage = args.stage.strip()
+
+    errors = {}
+    candidate_id = None
+    if raw_id.isascii() and raw_id.isdigit():
+        candidate_id = int(raw_id)
+    if candidate_id is None or candidate_id < 1:
+        errors["id"] = "invalid"
+    if not stage:
+        errors["stage"] = "required"
+    elif stage not in STAGES:
+        errors["stage"] = "invalid"
+    if errors:
+        emit_error(errors)
+        return 2
+
+    row = conn.execute(
+        "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
+        (candidate_id,),
+    ).fetchone()
+    if row is None:
+        emit_error({"id": "not_found"})
+        return 2
+
+    conn.execute("UPDATE candidates SET stage = ? WHERE id = ?", (stage, candidate_id))
+    conn.commit()
+
+    record = dict(zip(FIELDS, row))
+    record["stage"] = stage
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="recruiting")
     parser.add_argument("--db", required=True, help="SQLite 数据库文件路径")
@@ -110,6 +146,11 @@ def build_parser():
     list_parser = subparsers.add_parser("list", help="按岗位查询候选人")
     list_parser.add_argument("--position", required=True)
     list_parser.set_defaults(handler=cmd_list)
+
+    set_stage_parser = subparsers.add_parser("set-stage", help="按 id 修改候选人阶段")
+    set_stage_parser.add_argument("--id", required=True)
+    set_stage_parser.add_argument("--stage", required=True)
+    set_stage_parser.set_defaults(handler=cmd_set_stage)
 
     return parser
 
