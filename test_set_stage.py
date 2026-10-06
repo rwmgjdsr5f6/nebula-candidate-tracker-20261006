@@ -80,6 +80,8 @@ class SetStageTestCase(unittest.TestCase):
     def assert_failure(self, result, expected_errors):
         self.assertEqual(result.returncode, 2)
         self.assertEqual(result.stdout, "")
+        # 标准错误只有单行 JSON，不出现回溯等多行输出
+        self.assertEqual(len(result.stderr.splitlines()), 1, result.stderr)
         self.assertEqual(json.loads(result.stderr), {"errors": expected_errors})
         # 失败后两名候选人的全部字段与操作前相同
         self.assertEqual(self.list_candidates(), self.expected_records())
@@ -180,6 +182,41 @@ class SetStageFailureTests(SetStageTestCase):
         missing_id = str(max(self.lin_xiao["id"], self.zhou_ning["id"]) + 1000)
         result = self.set_stage(missing_id, "hired")
         self.assert_failure(result, {"id": "not_found"})
+
+    def test_sqlite_int64_max_id_is_not_found(self):
+        """整数上限本身是合法 id，无记录时返回 not_found 而非异常。"""
+        result = self.set_stage("9223372036854775807", "interviewing")
+        self.assert_failure(result, {"id": "not_found"})
+
+    def test_id_above_sqlite_int64_max_is_not_found(self):
+        """超过 SQLite 有符号整数上限的合法 id 返回 not_found，无回溯。"""
+        result = self.set_stage("9223372036854775808", "interviewing")
+        self.assert_failure(result, {"id": "not_found"})
+
+    def test_oversized_id_with_leading_zeros_is_not_found(self):
+        """带前导零的越界值含义不变，同样返回 not_found。"""
+        result = self.set_stage("0009223372036854775808", "interviewing")
+        self.assert_failure(result, {"id": "not_found"})
+
+    def test_all_zero_id_is_invalid(self):
+        """全零数字数值为零，仍属于 id 的 invalid。"""
+        result = self.set_stage("0000", "interviewing")
+        self.assert_failure(result, {"id": "invalid"})
+
+    def test_oversized_id_with_blank_stage_reports_only_stage(self):
+        """超大合法 id 与空阶段组合：仅返回 stage 的 required。"""
+        result = self.set_stage("9223372036854775808", "   ")
+        self.assert_failure(result, {"stage": "required"})
+
+    def test_oversized_id_with_unknown_stage_reports_only_stage(self):
+        """超大合法 id 与未知阶段组合：仅返回 stage 的 invalid。"""
+        result = self.set_stage("9223372036854775808", "offer")
+        self.assert_failure(result, {"stage": "invalid"})
+
+    def test_oversized_id_with_uppercase_stage_reports_only_stage(self):
+        """超大合法 id 与大写阶段组合：仅返回 stage 的 invalid。"""
+        result = self.set_stage("9223372036854775808", "INTERVIEWING")
+        self.assert_failure(result, {"stage": "invalid"})
 
     def test_validation_happens_before_lookup(self):
         """合法格式但不存在的 id 配上非法阶段：只返回 stage 的 invalid。"""
