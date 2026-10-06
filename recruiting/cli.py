@@ -84,15 +84,32 @@ def cmd_add(conn, args):
 
 def cmd_list(conn, args):
     position = args.position.strip()
+    stage = args.stage.strip() if args.stage is not None else None
+
+    errors = {}
     if not position:
-        emit_error({"position": "required"})
+        errors["position"] = "required"
+    if stage is not None:
+        if not stage:
+            errors["stage"] = "required"
+        elif stage not in STAGES:
+            errors["stage"] = "invalid"
+    if errors:
+        emit_error(errors)
         return 2
 
-    rows = conn.execute(
-        "SELECT id, name, email, position, stage FROM candidates"
-        " WHERE position = ? ORDER BY id ASC",
-        (position,),
-    ).fetchall()
+    if stage is None:
+        rows = conn.execute(
+            "SELECT id, name, email, position, stage FROM candidates"
+            " WHERE position = ? ORDER BY id ASC",
+            (position,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT id, name, email, position, stage FROM candidates"
+            " WHERE position = ? AND stage = ? ORDER BY id ASC",
+            (position, stage),
+        ).fetchall()
     records = [dict(zip(FIELDS, row)) for row in rows]
     print(json.dumps(records, ensure_ascii=False))
     return 0
@@ -144,6 +161,7 @@ def build_parser():
 
     list_parser = subparsers.add_parser("list", help="按岗位查询候选人")
     list_parser.add_argument("--position", required=True)
+    list_parser.add_argument("--stage")
     list_parser.set_defaults(handler=cmd_list)
 
     set_stage_parser = subparsers.add_parser("set-stage", help="按 id 修改候选人阶段")
