@@ -31,3 +31,10 @@ python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
 且不改动任何记录。成功时标准输出为更新后的候选人 JSON 对象，阶段之间允许
 任意互转，重复设置当前阶段也按成功处理。
 
+`set-position` 的岗位沿用登记规则：去除两端空白后为空返回 `required`，
+内部空白与大小写原样保存；id 规则与 `set-stage` 相同。参数错误合并为一个
+`errors` 对象，先完成参数校验再查找记录；不存在的 id 配合空岗位只报告
+position 的 `required`，合法但不存在的 id 返回 `not_found`。成功时只替换
+目标记录的岗位，保留 id、姓名、邮箱与阶段，不新增记录，重复设置当前岗位也
+按成功处理；结果 JSON 输出到标准输出，标准错误为空，退出码为 0。
+

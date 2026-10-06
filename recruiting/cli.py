@@ -234,6 +234,23 @@ def cmd_set_email(conn, args):
     )
 
 
+def validate_position(position):
+    """岗位沿用登记规则：去空白后为空返回 required。"""
+    if not position:
+        return "required"
+    return None
+
+
+def cmd_set_position(conn, args):
+    return update_candidate_field(
+        conn,
+        args.id.strip(),
+        "position",
+        args.position.strip(),
+        validate_position,
+    )
+
+
 def cmd_summary(conn, args):
     position = args.position.strip()
 
@@ -285,6 +302,11 @@ def build_parser():
     set_email_parser.add_argument("--id", required=True)
     set_email_parser.add_argument("--email", required=True)
     set_email_parser.set_defaults(handler=cmd_set_email)
+
+    set_position_parser = subparsers.add_parser("set-position", help="按 id 更正候选人岗位")
+    set_position_parser.add_argument("--id", required=True)
+    set_position_parser.add_argument("--position", required=True)
+    set_position_parser.set_defaults(handler=cmd_set_position)
 
     summary_parser = subparsers.add_parser("summary", help="按岗位汇总各阶段人数")
     summary_parser.add_argument("--position", required=True)
