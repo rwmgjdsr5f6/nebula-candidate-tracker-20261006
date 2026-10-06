@@ -210,6 +210,28 @@ def cmd_set_email(conn, args):
     )
 
 
+def cmd_get(conn, args):
+    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
+    if id_error is not None:
+        emit_error({"id": id_error})
+        return 2
+
+    if candidate_id_int > SQLITE_INT64_MAX:
+        # 与修改入口一致：超出 SQLite 整数范围的 id 按 not_found 处理。
+        emit_error({"id": "not_found"})
+        return 2
+    row = conn.execute(
+        "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
+        (candidate_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"id": "not_found"})
+        return 2
+
+    print(json.dumps(dict(zip(FIELDS, row)), ensure_ascii=False))
+    return 0
+
+
 def cmd_summary(conn, args):
     position = args.position.strip()
 
@@ -261,6 +283,10 @@ def build_parser():
     summary_parser = subparsers.add_parser("summary", help="按岗位汇总各阶段人数")
     summary_parser.add_argument("--position", required=True)
     summary_parser.set_defaults(handler=cmd_summary)
+
+    get_parser = subparsers.add_parser("get", help="按 id 查看单个候选人")
+    get_parser.add_argument("--id", required=True)
+    get_parser.set_defaults(handler=cmd_get)
 
     return parser
 
