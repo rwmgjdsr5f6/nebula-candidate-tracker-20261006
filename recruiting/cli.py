@@ -89,10 +89,13 @@ def cmd_list(conn, args):
     position = args.position.strip()
     stage = args.stage.strip() if args.stage is not None else None
     email = args.email.strip() if args.email is not None else None
+    name = args.name.strip() if args.name is not None else None
 
     errors = {}
     if not position:
         errors["position"] = "required"
+    if name is not None and not name:
+        errors["name"] = "required"
     if email is not None and email_is_invalid(email):
         errors["email"] = "invalid"
     if stage is not None:
@@ -106,6 +109,10 @@ def cmd_list(conn, args):
 
     sql = "SELECT id, name, email, position, stage FROM candidates WHERE position = ?"
     params = [position]
+    if name is not None:
+        # 仅去除两端空白后完整匹配：保留内部空白，BINARY 排序规则区分大小写。
+        sql += " AND name = ?"
+        params.append(name)
     if email is not None:
         sql += " AND email = ?"
         params.append(email)
@@ -306,6 +313,7 @@ def build_parser():
     list_parser.add_argument("--position", required=True)
     list_parser.add_argument("--stage")
     list_parser.add_argument("--email")
+    list_parser.add_argument("--name")
     list_parser.set_defaults(handler=cmd_list)
 
     get_parser = subparsers.add_parser("get", help="按 id 查看单个候选人")
