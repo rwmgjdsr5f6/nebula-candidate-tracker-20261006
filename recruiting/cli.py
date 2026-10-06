@@ -115,6 +115,32 @@ def cmd_list(conn, args):
     return 0
 
 
+def cmd_summary(conn, args):
+    position = args.position.strip()
+
+    if not position:
+        emit_error({"position": "required"})
+        return 2
+
+    rows = conn.execute(
+        "SELECT stage FROM candidates WHERE position = ?",
+        (position,),
+    ).fetchall()
+
+    counts = {stage: 0 for stage in STAGES}
+    for (stage,) in rows:
+        if stage in counts:
+            counts[stage] += 1
+
+    result = {
+        "position": position,
+        "total": len(rows),
+        "counts": counts,
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def cmd_set_stage(conn, args):
     candidate_id_raw = args.id.strip()
     stage = args.stage.strip()
@@ -168,6 +194,10 @@ def build_parser():
     set_stage_parser.add_argument("--id", required=True)
     set_stage_parser.add_argument("--stage", required=True)
     set_stage_parser.set_defaults(handler=cmd_set_stage)
+
+    summary_parser = subparsers.add_parser("summary", help="按岗位汇总各阶段人数")
+    summary_parser.add_argument("--position", required=True)
+    summary_parser.set_defaults(handler=cmd_summary)
 
     return parser
 
