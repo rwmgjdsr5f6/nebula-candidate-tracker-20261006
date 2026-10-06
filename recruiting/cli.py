@@ -118,17 +118,46 @@ def cmd_list(conn, args):
     return 0
 
 
-def cmd_set_stage(conn, args):
+def validate_candidate_id(candidate_id_raw):
+    """id 去空白后的校验：仅接受数值 >= 1 的 ASCII 数字串。"""
+    if not re.fullmatch(r"[0-9]+", candidate_id_raw) or int(candidate_id_raw) < 1:
+        return "invalid"
+    return None
+
+
+def validate_stage(stage):
+    """阶段去空白后的校验：空为 required，四种小写值之外为 invalid。"""
+    if not stage:
+        return "required"
+    if stage not in STAGES:
+        return "invalid"
+    return None
+
+
+def validate_email(email):
+    """邮箱去空白后的校验，沿用登记时的规则。"""
+    if email_is_invalid(email):
+        return "invalid"
+    return None
+
+
+def cmd_update_field(conn, args, field, validate_value):
+    """set-stage 与 set-email 共用的按 id 更新流程。
+
+    field 为目标列名（同时是 args 上的参数名），validate_value 为该字段
+    的校验函数，返回错误码或 None。先合并校验 id 与字段值，全部通过后才
+    查找并更新记录。
+    """
     candidate_id_raw = args.id.strip()
-    stage = args.stage.strip()
+    value = getattr(args, field).strip()
 
     errors = {}
-    if not re.fullmatch(r"[0-9]+", candidate_id_raw) or int(candidate_id_raw) < 1:
-        errors["id"] = "invalid"
-    if not stage:
-        errors["stage"] = "required"
-    elif stage not in STAGES:
-        errors["stage"] = "invalid"
+    id_error = validate_candidate_id(candidate_id_raw)
+    if id_error:
+        errors["id"] = id_error
+    value_error = validate_value(value)
+    if value_error:
+        errors[field] = value_error
     if errors:
         emit_error(errors)
         return 2
@@ -147,49 +176,25 @@ def cmd_set_stage(conn, args):
         emit_error({"id": "not_found"})
         return 2
 
-    conn.execute("UPDATE candidates SET stage = ? WHERE id = ?", (stage, candidate_id))
+    # field 只取自下方两条命令传入的固定列名，不存在注入风险。
+    conn.execute(
+        "UPDATE candidates SET {} = ? WHERE id = ?".format(field),
+        (value, candidate_id),
+    )
     conn.commit()
 
     record = dict(zip(FIELDS, row))
-    record["stage"] = stage
+    record[field] = value
     print(json.dumps(record, ensure_ascii=False))
     return 0
+
+
+def cmd_set_stage(conn, args):
+    return cmd_update_field(conn, args, "stage", validate_stage)
 
 
 def cmd_set_email(conn, args):
-    candidate_id_raw = args.id.strip()
-    email = args.email.strip()
-
-    errors = {}
-    if not re.fullmatch(r"[0-9]+", candidate_id_raw) or int(candidate_id_raw) < 1:
-        errors["id"] = "invalid"
-    if email_is_invalid(email):
-        errors["email"] = "invalid"
-    if errors:
-        emit_error(errors)
-        return 2
-
-    candidate_id = int(candidate_id_raw)
-    if candidate_id > SQLITE_INT64_MAX:
-        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
-        # 避免绑定参数时抛出 OverflowError。
-        emit_error({"id": "not_found"})
-        return 2
-    row = conn.execute(
-        "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
-        (candidate_id,),
-    ).fetchone()
-    if row is None:
-        emit_error({"id": "not_found"})
-        return 2
-
-    conn.execute("UPDATE candidates SET email = ? WHERE id = ?", (email, candidate_id))
-    conn.commit()
-
-    record = dict(zip(FIELDS, row))
-    record["email"] = email
-    print(json.dumps(record, ensure_ascii=False))
-    return 0
+    return cmd_update_field(conn, args, "email", validate_email)
 
 
 def cmd_summary(conn, args):
