@@ -14,6 +14,9 @@ python -m recruiting --db demo.sqlite3 add \
 # 按岗位精确查询（区分大小写），按 id 升序返回
 python -m recruiting --db demo.sqlite3 list --position "测试工程师"
 
+# 在岗位之内再按合成姓名精确查找（去除两端空白，保留内部空白、区分大小写）
+python -m recruiting --db demo.sqlite3 list --position "测试工程师" --name "林晓"
+
 # 按 id 修改候选人阶段（applied/interviewing/hired/rejected 均可互转）
 python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
 ```
@@ -22,6 +25,15 @@ python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
 邮箱不合规返回 `invalid`：多个字段错误同时输出到标准错误的单个 JSON 对象
 （`errors` 映射字段名到错误值），退出码为 2，且不写入记录。成功退出码为 0，
 结果 JSON 输出到标准输出。
+
+`list` 必传岗位，`--name`、`--stage`、`--email` 均可选；省略时不过滤该条件，
+提供时四个条件同时成立才算命中，同名候选人全部返回。`--name` 去除两端空白后
+与保存的姓名完整匹配（保留内部空白、区分英文字母大小写，不作子串或通配符
+匹配），显式传入空字符串或纯空白返回 `required`；岗位为空返回 `position` 的
+`required`，阶段为空返回 `stage` 的 `required`、非法或大写阶段返回
+`stage` 的 `invalid`，邮箱不合规返回 `email` 的 `invalid`，多个参数错误合并为
+同一个 `errors` 对象。结果为候选人五字段 JSON 数组、按 id 升序，没有匹配记录
+时返回 `[]`；查询不改动任何记录。
 
 `set-stage` 的阶段去除两端空白后按小写精确匹配，须为
 `applied`、`interviewing`、`hired`、`rejected` 之一：为空返回

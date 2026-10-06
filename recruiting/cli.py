@@ -47,8 +47,14 @@ def connect(db_path):
     return conn
 
 
-def emit_error(errors):
-    print(json.dumps({"errors": errors}, ensure_ascii=False), file=sys.stderr)
+def emit_error(errors, compact=False):
+    # 登记等既有命令沿用带空格的 JSON 文本；list 的查询参数错误按约定
+    # 输出无多余空白的紧凑 JSON。
+    separators = (",", ":") if compact else None
+    print(
+        json.dumps({"errors": errors}, ensure_ascii=False, separators=separators),
+        file=sys.stderr,
+    )
 
 
 def cmd_add(conn, args):
@@ -89,10 +95,13 @@ def cmd_list(conn, args):
     position = args.position.strip()
     stage = args.stage.strip() if args.stage is not None else None
     email = args.email.strip() if args.email is not None else None
+    name = args.name.strip() if args.name is not None else None
 
     errors = {}
     if not position:
         errors["position"] = "required"
+    if name is not None and not name:
+        errors["name"] = "required"
     if email is not None and email_is_invalid(email):
         errors["email"] = "invalid"
     if stage is not None:
@@ -101,11 +110,16 @@ def cmd_list(conn, args):
         elif stage not in STAGES:
             errors["stage"] = "invalid"
     if errors:
-        emit_error(errors)
+        emit_error(errors, compact=True)
         return 2
 
     sql = "SELECT id, name, email, position, stage FROM candidates WHERE position = ?"
     params = [position]
+    if name is not None:
+        # 默认 BINARY 比较按 UTF-8 字节完整匹配：区分英文字母大小写、
+        # 保留内部空白，不作子串或通配符匹配；重名记录全部返回。
+        sql += " AND name = ?"
+        params.append(name)
     if email is not None:
         sql += " AND email = ?"
         params.append(email)
@@ -304,6 +318,7 @@ def build_parser():
 
     list_parser = subparsers.add_parser("list", help="按岗位查询候选人")
     list_parser.add_argument("--position", required=True)
+    list_parser.add_argument("--name")
     list_parser.add_argument("--stage")
     list_parser.add_argument("--email")
     list_parser.set_defaults(handler=cmd_list)
