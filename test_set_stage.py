@@ -127,6 +127,16 @@ class SetStageSuccessTests(SetStageTestCase):
             self.expected_records({self.lin_xiao["id"]: "hired"}),
         )
 
+    def test_id_with_leading_zeros_succeeds(self):
+        """前导零不改变编号含义，仍定位同一候选人。"""
+        result = self.set_stage("00{}".format(self.lin_xiao["id"]), "hired")
+        expected = dict(self.lin_xiao, stage="hired")
+        self.assert_success(result, expected)
+        self.assertEqual(
+            self.list_candidates(),
+            self.expected_records({self.lin_xiao["id"]: "hired"}),
+        )
+
     def test_stage_with_surrounding_whitespace_returns_trimmed(self):
         """阶段两端空白被去除，返回值是去空白后的阶段。"""
         result = self.set_stage(str(self.lin_xiao["id"]), "  interviewing  ")
@@ -185,6 +195,55 @@ class SetStageFailureTests(SetStageTestCase):
         """合法格式但不存在的 id 配上非法阶段：只返回 stage 的 invalid。"""
         missing_id = str(max(self.lin_xiao["id"], self.zhou_ning["id"]) + 1000)
         result = self.set_stage(missing_id, "offer")
+        self.assert_failure(result, {"stage": "invalid"})
+
+
+class SetStageOverflowIdTests(SetStageTestCase):
+    """超过 SQLite 有符号整数上限（9223372036854775807）的合法 id。"""
+
+    SQLITE_MAX_INT = 9223372036854775807
+
+    def assert_not_found(self, result):
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        # 标准错误只有单行 JSON，无异常回溯
+        self.assertEqual(result.stderr.count("\n"), 1)
+        self.assertEqual(json.loads(result.stderr), {"errors": {"id": "not_found"}})
+        self.assertEqual(self.list_candidates(), self.expected_records())
+
+    def test_max_int_id_is_not_found(self):
+        """整数上限本身：格式合法但无记录，返回 not_found。"""
+        result = self.set_stage(str(self.SQLITE_MAX_INT), "interviewing")
+        self.assert_not_found(result)
+
+    def test_max_int_plus_one_is_not_found(self):
+        """上限加一：不得报 invalid，也不得出现异常回溯。"""
+        result = self.set_stage(str(self.SQLITE_MAX_INT + 1), "interviewing")
+        self.assert_not_found(result)
+
+    def test_overflow_id_with_leading_zeros_is_not_found(self):
+        """带前导零的越界值仍按同一编号处理，返回 not_found。"""
+        result = self.set_stage("00" + str(self.SQLITE_MAX_INT + 1), "hired")
+        self.assert_not_found(result)
+
+    def test_far_overflow_id_is_not_found(self):
+        """远超上限的合法正整数同样返回 not_found。"""
+        result = self.set_stage("9" * 30, "interviewing")
+        self.assert_not_found(result)
+
+    def test_overflow_id_with_blank_stage_reports_stage_required(self):
+        """超大合法 id 与空阶段组合：仅返回 stage 的 required。"""
+        result = self.set_stage(str(self.SQLITE_MAX_INT + 1), "   ")
+        self.assert_failure(result, {"stage": "required"})
+
+    def test_overflow_id_with_unknown_stage_reports_stage_invalid(self):
+        """超大合法 id 与未知阶段组合：仅返回 stage 的 invalid。"""
+        result = self.set_stage(str(self.SQLITE_MAX_INT + 1), "offer")
+        self.assert_failure(result, {"stage": "invalid"})
+
+    def test_overflow_id_with_uppercase_stage_reports_stage_invalid(self):
+        """超大合法 id 与大写阶段组合：仅返回 stage 的 invalid。"""
+        result = self.set_stage(str(self.SQLITE_MAX_INT + 1), "INTERVIEWING")
         self.assert_failure(result, {"stage": "invalid"})
 
 

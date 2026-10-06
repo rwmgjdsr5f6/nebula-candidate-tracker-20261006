@@ -19,6 +19,9 @@ CREATE TABLE IF NOT EXISTS candidates (
 
 FIELDS = ("id", "name", "email", "position", "stage")
 
+# SQLite 有符号整数上限，超过此值的 id 不可能对应任何记录
+SQLITE_MAX_INT = 9223372036854775807
+
 
 def email_is_invalid(email):
     """邮箱去空白后的校验规则，不合规返回 True。"""
@@ -131,6 +134,10 @@ def cmd_set_stage(conn, args):
         return 2
 
     candidate_id = int(candidate_id_raw)
+    if candidate_id > SQLITE_MAX_INT:
+        # 超出 SQLite 整数上限的合法 id 不可能有对应记录，按 not_found 处理
+        emit_error({"id": "not_found"})
+        return 2
     row = conn.execute(
         "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
         (candidate_id,),
