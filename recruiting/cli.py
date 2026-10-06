@@ -176,6 +176,30 @@ def update_candidate_field(conn, candidate_id, field, value, validate_field):
     return 0
 
 
+def cmd_get(conn, args):
+    """按 id 查看单个候选人，只读查询，不改动任何记录。"""
+    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
+    if id_error is not None:
+        emit_error({"id": id_error})
+        return 2
+
+    if candidate_id_int > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"id": "not_found"})
+        return 2
+    row = conn.execute(
+        "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
+        (candidate_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"id": "not_found"})
+        return 2
+
+    print(json.dumps(dict(zip(FIELDS, row)), ensure_ascii=False))
+    return 0
+
+
 def validate_stage(stage):
     """阶段去空白后的规则：为空返回 required，四种小写值之外返回 invalid。"""
     if not stage:
@@ -247,6 +271,10 @@ def build_parser():
     list_parser.add_argument("--position", required=True)
     list_parser.add_argument("--stage")
     list_parser.set_defaults(handler=cmd_list)
+
+    get_parser = subparsers.add_parser("get", help="按 id 查看单个候选人")
+    get_parser.add_argument("--id", required=True)
+    get_parser.set_defaults(handler=cmd_get)
 
     set_stage_parser = subparsers.add_parser("set-stage", help="按 id 修改候选人阶段")
     set_stage_parser.add_argument("--id", required=True)
