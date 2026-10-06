@@ -156,6 +156,42 @@ def cmd_set_stage(conn, args):
     return 0
 
 
+def cmd_set_email(conn, args):
+    candidate_id_raw = args.id.strip()
+    email = args.email.strip()
+
+    errors = {}
+    if not re.fullmatch(r"[0-9]+", candidate_id_raw) or int(candidate_id_raw) < 1:
+        errors["id"] = "invalid"
+    if email_is_invalid(email):
+        errors["email"] = "invalid"
+    if errors:
+        emit_error(errors)
+        return 2
+
+    candidate_id = int(candidate_id_raw)
+    if candidate_id > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"id": "not_found"})
+        return 2
+    row = conn.execute(
+        "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
+        (candidate_id,),
+    ).fetchone()
+    if row is None:
+        emit_error({"id": "not_found"})
+        return 2
+
+    conn.execute("UPDATE candidates SET email = ? WHERE id = ?", (email, candidate_id))
+    conn.commit()
+
+    record = dict(zip(FIELDS, row))
+    record["email"] = email
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
 def cmd_summary(conn, args):
     position = args.position.strip()
 
@@ -198,6 +234,11 @@ def build_parser():
     set_stage_parser.add_argument("--id", required=True)
     set_stage_parser.add_argument("--stage", required=True)
     set_stage_parser.set_defaults(handler=cmd_set_stage)
+
+    set_email_parser = subparsers.add_parser("set-email", help="按 id 更正候选人邮箱")
+    set_email_parser.add_argument("--id", required=True)
+    set_email_parser.add_argument("--email", required=True)
+    set_email_parser.set_defaults(handler=cmd_set_email)
 
     summary_parser = subparsers.add_parser("summary", help="按岗位汇总各阶段人数")
     summary_parser.add_argument("--position", required=True)
