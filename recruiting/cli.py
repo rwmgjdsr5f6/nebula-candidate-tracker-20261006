@@ -148,6 +148,28 @@ def cmd_set_stage(conn, args):
     return 0
 
 
+def cmd_summary(conn, args):
+    position = args.position.strip()
+
+    if not position:
+        emit_error({"position": "required"})
+        return 2
+
+    rows = conn.execute(
+        "SELECT stage, COUNT(*) FROM candidates WHERE position = ? GROUP BY stage",
+        (position,),
+    ).fetchall()
+    counts = {stage: 0 for stage in STAGES}
+    for stage, count in rows:
+        if stage in counts:
+            counts[stage] = count
+    total = sum(counts.values())
+
+    result = {"position": position, "total": total, "counts": counts}
+    print(json.dumps(result, ensure_ascii=False))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="recruiting")
     parser.add_argument("--db", required=True, help="SQLite 数据库文件路径")
@@ -168,6 +190,10 @@ def build_parser():
     set_stage_parser.add_argument("--id", required=True)
     set_stage_parser.add_argument("--stage", required=True)
     set_stage_parser.set_defaults(handler=cmd_set_stage)
+
+    summary_parser = subparsers.add_parser("summary", help="按岗位汇总各阶段人数")
+    summary_parser.add_argument("--position", required=True)
+    summary_parser.set_defaults(handler=cmd_summary)
 
     return parser
 
