@@ -118,78 +118,96 @@ def cmd_list(conn, args):
     return 0
 
 
-def cmd_set_stage(conn, args):
-    candidate_id_raw = args.id.strip()
-    stage = args.stage.strip()
+def validate_candidate_id(candidate_id):
+    """id 去空白后的规则：须为正整数（允许前导零）。
 
+    合法返回 (None, 对应整数)；空值、全零、负数、带正号或含非 ASCII
+    数字等返回 ("invalid", None)。
+    """
+    if not re.fullmatch(r"[0-9]+", candidate_id) or int(candidate_id) < 1:
+        return "invalid", None
+    return None, int(candidate_id)
+
+
+def update_candidate_field(conn, candidate_id, field, value, validate_field):
+    """set-stage 与 set-email 共用的按 id 更新流程。
+
+    先合并完成 id 与字段值的全部校验，再查找记录；任一步失败都只输出
+    单行 errors JSON 到 stderr、返回 2 且不改动任何记录。成功时更新
+    field 列（field 仅由两个命令处理函数以字面量传入，非用户输入），
+    提交后输出更新后的完整候选人 JSON，返回 0。
+
+    validate_field 入参为已去空白的字段值，通过返回 None，否则返回
+    该字段的错误值（"required" 或 "invalid"）。
+    """
     errors = {}
-    if not re.fullmatch(r"[0-9]+", candidate_id_raw) or int(candidate_id_raw) < 1:
-        errors["id"] = "invalid"
-    if not stage:
-        errors["stage"] = "required"
-    elif stage not in STAGES:
-        errors["stage"] = "invalid"
+    id_error, candidate_id_int = validate_candidate_id(candidate_id)
+    if id_error is not None:
+        errors["id"] = id_error
+    field_error = validate_field(value)
+    if field_error is not None:
+        errors[field] = field_error
     if errors:
         emit_error(errors)
         return 2
 
-    candidate_id = int(candidate_id_raw)
-    if candidate_id > SQLITE_INT64_MAX:
+    if candidate_id_int > SQLITE_INT64_MAX:
         # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
         # 避免绑定参数时抛出 OverflowError。
         emit_error({"id": "not_found"})
         return 2
     row = conn.execute(
         "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
-        (candidate_id,),
+        (candidate_id_int,),
     ).fetchone()
     if row is None:
         emit_error({"id": "not_found"})
         return 2
 
-    conn.execute("UPDATE candidates SET stage = ? WHERE id = ?", (stage, candidate_id))
+    conn.execute(
+        "UPDATE candidates SET {} = ? WHERE id = ?".format(field),
+        (value, candidate_id_int),
+    )
     conn.commit()
 
     record = dict(zip(FIELDS, row))
-    record["stage"] = stage
+    record[field] = value
     print(json.dumps(record, ensure_ascii=False))
     return 0
+
+
+def validate_stage(stage):
+    """阶段去空白后的规则：为空返回 required，四种小写值之外返回 invalid。"""
+    if not stage:
+        return "required"
+    if stage not in STAGES:
+        return "invalid"
+    return None
+
+
+def cmd_set_stage(conn, args):
+    return update_candidate_field(
+        conn,
+        args.id.strip(),
+        "stage",
+        args.stage.strip(),
+        validate_stage,
+    )
+
+
+def validate_email(email):
+    """邮箱沿用登记时的校验规则（含空值）：不合规返回 invalid。"""
+    return "invalid" if email_is_invalid(email) else None
 
 
 def cmd_set_email(conn, args):
-    candidate_id_raw = args.id.strip()
-    email = args.email.strip()
-
-    errors = {}
-    if not re.fullmatch(r"[0-9]+", candidate_id_raw) or int(candidate_id_raw) < 1:
-        errors["id"] = "invalid"
-    if email_is_invalid(email):
-        errors["email"] = "invalid"
-    if errors:
-        emit_error(errors)
-        return 2
-
-    candidate_id = int(candidate_id_raw)
-    if candidate_id > SQLITE_INT64_MAX:
-        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
-        # 避免绑定参数时抛出 OverflowError。
-        emit_error({"id": "not_found"})
-        return 2
-    row = conn.execute(
-        "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
-        (candidate_id,),
-    ).fetchone()
-    if row is None:
-        emit_error({"id": "not_found"})
-        return 2
-
-    conn.execute("UPDATE candidates SET email = ? WHERE id = ?", (email, candidate_id))
-    conn.commit()
-
-    record = dict(zip(FIELDS, row))
-    record["email"] = email
-    print(json.dumps(record, ensure_ascii=False))
-    return 0
+    return update_candidate_field(
+        conn,
+        args.id.strip(),
+        "email",
+        args.email.strip(),
+        validate_email,
+    )
 
 
 def cmd_summary(conn, args):
