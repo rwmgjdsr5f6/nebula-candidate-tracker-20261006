@@ -130,7 +130,7 @@ def validate_candidate_id(candidate_id):
 
 
 def update_candidate_field(conn, candidate_id, field, value, validate_field):
-    """set-stage 与 set-email 共用的按 id 更新流程。
+    """set-stage、set-email、set-position 与 set-name 共用的按 id 更新流程。
 
     先合并完成 id 与字段值的全部校验，再查找记录；任一步失败都只输出
     单行 errors JSON 到 stderr、返回 2 且不改动任何记录。成功时更新
@@ -251,6 +251,23 @@ def cmd_set_position(conn, args):
     )
 
 
+def validate_name(name):
+    """姓名沿用登记规则：去空白后为空返回 required。"""
+    if not name:
+        return "required"
+    return None
+
+
+def cmd_set_name(conn, args):
+    return update_candidate_field(
+        conn,
+        args.id.strip(),
+        "name",
+        args.name.strip(),
+        validate_name,
+    )
+
+
 def cmd_summary(conn, args):
     position = args.position.strip()
 
@@ -307,6 +324,11 @@ def build_parser():
     set_position_parser.add_argument("--id", required=True)
     set_position_parser.add_argument("--position", required=True)
     set_position_parser.set_defaults(handler=cmd_set_position)
+
+    set_name_parser = subparsers.add_parser("set-name", help="按 id 更正候选人姓名")
+    set_name_parser.add_argument("--id", required=True)
+    set_name_parser.add_argument("--name", required=True)
+    set_name_parser.set_defaults(handler=cmd_set_name)
 
     summary_parser = subparsers.add_parser("summary", help="按岗位汇总各阶段人数")
     summary_parser.add_argument("--position", required=True)
