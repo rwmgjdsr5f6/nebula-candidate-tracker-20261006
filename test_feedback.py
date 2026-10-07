@@ -442,6 +442,173 @@ class SetFeedbackTests(FeedbackTestCase):
         self.assertIn("usage", result.stderr)
 
 
+class DeleteFeedbackTests(FeedbackTestCase):
+    def setUp(self):
+        super().setUp()
+        lin_id = self.lin_xiao["id"]
+        zhou_id = self.zhou_ning["id"]
+        # 第一人两条（编号 1、2，文字相同），第二人一条（编号 3）
+        self.first = self.assert_add_success(
+            self.add_feedback(lin_id, "表达清楚"), lin_id, "表达清楚"
+        )
+        self.second = self.assert_add_success(
+            self.add_feedback(lin_id, "表达清楚"), lin_id, "表达清楚"
+        )
+        self.third = self.assert_add_success(
+            self.add_feedback(zhou_id, "周宁评价"), zhou_id, "周宁评价"
+        )
+
+    def delete_feedback(self, feedback_id):
+        return self.run_cli(
+            "delete-feedback", "--feedback-id", str(feedback_id)
+        )
+
+    def assert_delete_success(self, result, expected):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        # 标准输出只有单行 JSON，换行经转义而不拆成多行
+        self.assertEqual(len(result.stdout.splitlines()), 1, result.stdout)
+        record = json.loads(result.stdout)
+        self.assertEqual(record, expected)
+        self.assertEqual(set(record), {"id", "candidate_id", "text"})
+        return record
+
+    def test_delete_returns_original_record(self):
+        """删除编号 2 返回林晓第二条评价的原对象，编号只定位评价。"""
+        result = self.delete_feedback(self.second["id"])
+        self.assert_delete_success(result, self.second)
+        lin_id = self.lin_xiao["id"]
+        # 候选人 id 2（周宁）存在，但删除的是评价 id 2，属于林晓
+        self.assertEqual(self.zhou_ning["id"], 2)
+        self.assertEqual(json.loads(result.stdout)["candidate_id"], lin_id)
+        # 林晓只剩编号 1，周宁的评价不变，升序排列保持
+        self.assert_list(lin_id, [self.first])
+        self.assert_list(self.zhou_ning["id"], [self.third])
+
+    def test_deleted_text_kept_verbatim_with_escaped_newline(self):
+        """返回文本保持保存时的内容，内部换行通过 JSON 转义单行输出。"""
+        text = "Line TWO 二行  \n继续"
+        record = self.assert_add_success(
+            self.add_feedback(self.lin_xiao["id"], "  " + text + "  "),
+            self.lin_xiao["id"], text,
+        )
+        result = self.delete_feedback(record["id"])
+        self.assert_delete_success(
+            result,
+            {"id": record["id"], "candidate_id": self.lin_xiao["id"], "text": text},
+        )
+        self.assertIn("\\n", result.stdout)
+
+    def test_delete_last_feedback_keeps_candidate_and_empty_list(self):
+        """删除候选人最后一条评价后候选人仍存在，评价查询返回 []。"""
+        result = self.delete_feedback(self.third["id"])
+        self.assert_delete_success(result, self.third)
+        self.assert_list(self.zhou_ning["id"], [])
+        get_result = self.run_cli("get", "--id", str(self.zhou_ning["id"]))
+        self.assertEqual(get_result.returncode, 0, get_result.stderr)
+        self.assertEqual(json.loads(get_result.stdout)["id"], self.zhou_ning["id"])
+
+    def test_delete_persists_across_reopen(self):
+        """重新打开同一数据库后删除结果保持一致。"""
+        self.delete_feedback(self.second["id"])
+        expected_lin = [self.first]
+        expected_zhou = [self.third]
+        self.assert_list(self.lin_xiao["id"], expected_lin)
+        self.assert_list(self.zhou_ning["id"], expected_zhou)
+        self.assert_list(self.lin_xiao["id"], expected_lin)
+        self.assert_list(self.zhou_ning["id"], expected_zhou)
+
+    def test_repeat_delete_is_not_found(self):
+        """成功删除后再次删除同一编号按评价不存在处理。"""
+        self.assert_delete_success(
+            self.delete_feedback(self.second["id"]), self.second
+        )
+        self.assert_failure(
+            self.delete_feedback(self.second["id"]),
+            {"feedback_id": "not_found"},
+        )
+        # 失败不改动其余记录
+        self.assert_list(self.lin_xiao["id"], [self.first])
+        self.assert_list(self.zhou_ning["id"], [self.third])
+
+    def test_set_feedback_after_delete_is_not_found(self):
+        """删除后用 set-feedback 更正该编号也按评价不存在处理。"""
+        self.delete_feedback(self.second["id"])
+        self.assert_failure(
+            self.run_cli(
+                "set-feedback",
+                "--feedback-id", str(self.second["id"]),
+                "--text", "新文字",
+            ),
+            {"feedback_id": "not_found"},
+        )
+
+    def test_later_add_does_not_reuse_deleted_id(self):
+        """后续追加评价使用新的递增编号，不复用已删除编号，顺序不变。"""
+        self.delete_feedback(self.second["id"])
+        new_record = self.assert_add_success(
+            self.add_feedback(self.lin_xiao["id"], "新评价"),
+            self.lin_xiao["id"], "新评价",
+        )
+        self.assertGreater(new_record["id"], self.third["id"])
+        self.assert_list(
+            self.lin_xiao["id"], [self.first, new_record]
+        )
+        self.assert_list(self.zhou_ning["id"], [self.third])
+
+    def test_leading_zero_and_surrounding_whitespace_id(self):
+        result = self.delete_feedback("  000{}  ".format(self.third["id"]))
+        self.assert_delete_success(result, self.third)
+
+    def test_invalid_feedback_id_is_reported(self):
+        for bad_id in ("", "   ", "abc", "0", "000", "-1", "1.5", "+1", "１２"):
+            with self.subTest(bad_id=repr(bad_id)):
+                self.assert_failure(
+                    self.delete_feedback(bad_id),
+                    {"feedback_id": "invalid"},
+                )
+
+    def test_unknown_feedback_id_is_not_found(self):
+        self.assert_failure(
+            self.delete_feedback(999), {"feedback_id": "not_found"}
+        )
+
+    def test_id_above_sqlite_int64_max_is_not_found(self):
+        self.assert_failure(
+            self.delete_feedback("9223372036854775808"),
+            {"feedback_id": "not_found"},
+        )
+
+    def test_failure_saves_nothing(self):
+        """参数或存在性错误不改动评价、候选人、阶段历史或岗位统计。"""
+        lin_id = self.lin_xiao["id"]
+        profile_before = self.run_cli("get", "--id", str(lin_id))
+        summary_before = self.run_cli("summary", "--position", POSITION)
+        self.delete_feedback("abc")
+        self.delete_feedback("0")
+        self.delete_feedback(999)
+        self.delete_feedback("9223372036854775808")
+        self.assert_list(lin_id, [self.first, self.second])
+        self.assert_list(self.zhou_ning["id"], [self.third])
+        self.assertEqual(
+            self.run_cli("get", "--id", str(lin_id)).stdout,
+            profile_before.stdout,
+        )
+        self.assertEqual(
+            self.run_cli("stage-history", "--id", str(lin_id)).stdout, "[]\n"
+        )
+        self.assertEqual(
+            self.run_cli("summary", "--position", POSITION).stdout,
+            summary_before.stdout,
+        )
+
+    def test_missing_feedback_id_option_is_usage_error(self):
+        result = self.run_cli("delete-feedback")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("usage", result.stderr)
+
+
 class FeedbackExistingDatabaseTests(unittest.TestCase):
     """只有 candidates 表的旧库直接可用，历史候选人初始评价为空。"""
 

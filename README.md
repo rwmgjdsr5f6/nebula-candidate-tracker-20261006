@@ -32,6 +32,9 @@ python -m recruiting --db demo.sqlite3 list-feedback --id 1
 # 按评价编号更正一条评价的文字（保留评价 id 与归属的候选人 id）
 python -m recruiting --db demo.sqlite3 set-feedback --feedback-id 2 --text "表达清楚"
 
+# 按评价编号删除一条合成评价（返回被删评价的原对象）
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id 2
+
 # 按岗位汇总各阶段人数（单个对象）
 python -m recruiting --db demo.sqlite3 summary --position "测试工程师"
 
@@ -113,6 +116,23 @@ id 规则与 `set-stage` 相同（去除两端空白，仅接受 ASCII 数字组
 为当前文字也按成功处理，不改变候选人资料、阶段历史或岗位统计。缺少
 `--feedback-id` 或 `--text` 时标准错误为用法说明，标准输出为空，退出码为
 2。
+
+`delete-feedback` 接收必填的 `--feedback-id`，按评价编号（取自已有评价结果，
+不是候选人编号，即使编号数值与某位候选人 id 相同也只定位评价）删除一条
+合成评价。编号规则与 `set-feedback` 相同：去除两端空白后须为 ASCII 数字
+组成的正整数（允许前导零），显式空值、全零、负数、带正号、小数或含非
+ASCII 数字时返回 `feedback_id` 的 `invalid`；编号合法但评价不存在（含
+9223372036854775808）时返回 `feedback_id` 的 `not_found`。字段错误只向
+标准错误输出单行 errors JSON，标准输出为空，退出码为 2，且不改动任何
+记录。缺少 `--feedback-id` 时标准错误为用法说明，标准输出为空，退出码为
+2。成功时删除目标评价，标准输出为仅含被删记录原来的 `id`、`candidate_id`
+和 `text` 的单行 JSON 对象（文本保持保存时的内容，内部换行通过 JSON 转义
+表示，不拆成多行），标准错误为空，退出码为 0；删除最后一条评价后候选人
+仍存在，`list-feedback` 返回 `[]`。重新打开同一数据库后删除结果保持一致，
+其余评价的编号、文字、归属和按 id 升序的顺序不变，后续 `add-feedback`
+不复用已删除编号（AUTOINCREMENT 继续递增）；成功删除后再次删除同一编号或
+用 `set-feedback` 更正该编号都按评价不存在处理，不改变候选人资料、阶段
+历史或岗位统计。
 
 `set-position` 的岗位沿用登记规则：去除两端空白后为空返回 `required`，
 内部空白与大小写原样保存；id 规则与 `set-stage` 相同。参数错误合并为一个
