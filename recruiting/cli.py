@@ -32,6 +32,13 @@ FIELDS = ("id", "name", "email", "position", "stage")
 
 # SQLite 有符号整数上限；超过此值的合法 id 不可能有对应记录。
 SQLITE_INT64_MAX = 9223372036854775807
+_SQLITE_INT64_MAX_DIGITS = str(SQLITE_INT64_MAX)
+
+# 超过 int64 上限的合法编号统一返回的占位值（恒大于 SQLITE_INT64_MAX）。
+# Python 3.11 起 int() 默认拒绝转换 4300 位以上的数字字符串，5000 位等
+# 超长编号无法得到真实整数，而各命令在定位记录前只需要“是否越界”这一
+# 信息：命中越界分支后立即按 not_found 返回，占位值不会作为 SQL 参数绑定。
+OVERSIZED_ID = SQLITE_INT64_MAX + 1
 
 
 def email_is_invalid(email):
@@ -160,10 +167,25 @@ def validate_candidate_id(candidate_id):
 
     合法返回 (None, 对应整数)；空值、全零、负数、带正号或含非 ASCII
     数字等返回 ("invalid", None)。
+
+    Python 3.11 起 int() 默认拒绝转换超过 4300 位的数字字符串（抛
+    ValueError），因此先按位数与字符串比较判断与 SQLite int64 上限的
+    关系，只有不超过上限的编号才调用 int()：去前导零后位数更多、或位数
+    相同而字典序更大即越界，返回占位值 OVERSIZED_ID，由调用方统一按
+    not_found 处理。前导零再多也不影响判定结果。
     """
-    if not re.fullmatch(r"[0-9]+", candidate_id) or int(candidate_id) < 1:
+    if not re.fullmatch(r"[0-9]+", candidate_id):
         return "invalid", None
-    return None, int(candidate_id)
+    digits = candidate_id.lstrip("0")
+    if not digits:
+        # 全零（含 "0" 与任意多个 "0"）不是正整数。
+        return "invalid", None
+    if len(digits) > len(_SQLITE_INT64_MAX_DIGITS) or (
+        len(digits) == len(_SQLITE_INT64_MAX_DIGITS)
+        and digits > _SQLITE_INT64_MAX_DIGITS
+    ):
+        return None, OVERSIZED_ID
+    return None, int(digits)
 
 
 def resolve_candidate_id(conn, candidate_id):
