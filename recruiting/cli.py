@@ -417,42 +417,50 @@ def cmd_set_name(conn, args):
     )
 
 
+def empty_stage_counts():
+    """四个阶段各计 0 的计数表，两种汇总模式共用的初始结构。"""
+    return {stage: 0 for stage in STAGES}
+
+
+def build_summary(position, counts):
+    """由岗位名与阶段计数表组装汇总对象，total 为四项计数之和。"""
+    return {"position": position, "total": sum(counts.values()), "counts": counts}
+
+
 def summary_for_position(conn, position):
     """单个岗位的各阶段人数汇总，未出现的阶段计 0。"""
     rows = conn.execute(
         "SELECT stage, COUNT(*) FROM candidates WHERE position = ? GROUP BY stage",
         (position,),
     ).fetchall()
-    counts = {stage: 0 for stage in STAGES}
+    counts = empty_stage_counts()
     for stage, count in rows:
         if stage in counts:
             counts[stage] = count
-    return {"position": position, "total": sum(counts.values()), "counts": counts}
+    return build_summary(position, counts)
+
+
+def summary_for_all_positions(conn):
+    """全部岗位的各阶段人数汇总，按岗位名称 Unicode 码点升序排列。
+
+    按当前岗位、阶段分组，只保留至少有一名候选人的岗位；岗位更正后旧
+    岗位若无候选人自然不再出现。默认 BINARY 分组区分大小写与内部空白。
+    """
+    rows = conn.execute(
+        "SELECT position, stage, COUNT(*) FROM candidates"
+        " GROUP BY position, stage"
+    ).fetchall()
+    grouped = {}
+    for position, stage, count in rows:
+        counts = grouped.setdefault(position, empty_stage_counts())
+        if stage in counts:
+            counts[stage] = count
+    return [build_summary(position, grouped[position]) for position in sorted(grouped)]
 
 
 def cmd_summary(conn, args):
     if args.all_positions:
-        # 一次汇总全部岗位：按当前岗位、阶段分组，只保留至少有一名候选人的
-        # 岗位；岗位更正后旧岗位若无候选人自然不再出现。默认 BINARY 分组
-        # 区分大小写与内部空白；名称按 Unicode 码点升序在 Python 侧排序。
-        rows = conn.execute(
-            "SELECT position, stage, COUNT(*) FROM candidates"
-            " GROUP BY position, stage"
-        ).fetchall()
-        grouped = {}
-        for position, stage, count in rows:
-            counts = grouped.setdefault(position, {s: 0 for s in STAGES})
-            if stage in counts:
-                counts[stage] = count
-        results = [
-            {
-                "position": position,
-                "total": sum(grouped[position].values()),
-                "counts": grouped[position],
-            }
-            for position in sorted(grouped)
-        ]
-        print(json.dumps(results, ensure_ascii=False))
+        print(json.dumps(summary_for_all_positions(conn), ensure_ascii=False))
         return 0
 
     position = args.position.strip()
@@ -461,8 +469,7 @@ def cmd_summary(conn, args):
         emit_error({"position": "required"})
         return 2
 
-    result = summary_for_position(conn, position)
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(summary_for_position(conn, position), ensure_ascii=False))
     return 0
 
 
