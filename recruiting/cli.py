@@ -414,6 +414,44 @@ def cmd_set_feedback(conn, args):
     return 0
 
 
+def cmd_delete_feedback(conn, args):
+    """按评价 id 删除一条合成评价。
+
+    feedback_id 沿用 set-feedback 的公开规则：去两端空白后只接受 ASCII
+    数字组成的正整数（允许前导零），即使数值对应某位候选人 id 也只定位
+    评价。编号非法或评价不存在（含已删除的编号）都只向标准错误输出单行
+    errors JSON、返回 2，不改动任何记录。成功时删除目标评价，标准输出
+    返回被删除记录原来的 id、candidate_id 与 text；候选人资料、阶段历史
+    与岗位统计不受影响，后续追加由 AUTOINCREMENT 保证不复用已删除编号。
+    """
+    feedback_id_error, feedback_id_int = validate_candidate_id(
+        args.feedback_id.strip()
+    )
+    if feedback_id_error is not None:
+        emit_error({"feedback_id": feedback_id_error})
+        return 2
+
+    if feedback_id_int > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"feedback_id": "not_found"})
+        return 2
+
+    row = conn.execute(
+        "SELECT id, candidate_id, text FROM feedback WHERE id = ?",
+        (feedback_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"feedback_id": "not_found"})
+        return 2
+
+    conn.execute("DELETE FROM feedback WHERE id = ?", (feedback_id_int,))
+    conn.commit()
+    record = {"id": row[0], "candidate_id": row[1], "text": row[2]}
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
 def validate_email(email):
     """邮箱沿用登记时的校验规则（含空值）：不合规返回 invalid。"""
     return "invalid" if email_is_invalid(email) else None
@@ -583,6 +621,12 @@ def build_parser():
     set_feedback_parser.add_argument("--feedback-id", required=True)
     set_feedback_parser.add_argument("--text", required=True)
     set_feedback_parser.set_defaults(handler=cmd_set_feedback)
+
+    delete_feedback_parser = subparsers.add_parser(
+        "delete-feedback", help="按评价 id 删除一条合成评价"
+    )
+    delete_feedback_parser.add_argument("--feedback-id", required=True)
+    delete_feedback_parser.set_defaults(handler=cmd_delete_feedback)
 
     set_email_parser = subparsers.add_parser("set-email", help="按 id 更正候选人邮箱")
     set_email_parser.add_argument("--id", required=True)
