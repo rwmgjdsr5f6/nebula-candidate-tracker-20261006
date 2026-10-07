@@ -1,0 +1,687 @@
+================================================================================
+delete-feedback 删除流程说明 —— 一次删除如何确定目标、保存结果并影响后续查询
+================================================================================
+
+生成日期：2026-10-08
+适用命令：python -m recruiting --db <数据库文件> delete-feedback --feedback-id <编号>
+依据材料：仓库内 README.md、recruiting/cli.py、recruiting/__main__.py、
+          recruiting/__init__.py、test_feedback.py（静态阅读），以及本次在
+          临时目录中对公开命令的真实执行（结果见标注 [实测]）。
+执行环境：[实测] Python 3.14.4 / SQLite 3.46.1（python3 标准库 sqlite3），
+          Linux，命令均在仓库根目录以 `python3 -m recruiting` 调用。
+本次范围：只围绕 delete-feedback 一条命令，及其成功/失败对 list-feedback、
+          get、stage-history、summary 等只读查询和 set-feedback、
+          add-feedback 的后续影响。
+未改动项：产品代码、README.md、公开命令行接口、数据库存储格式均保持原样；
+          本文件 feedback_delete_flow.txt 是本轮唯一交付物。全部演示数据库
+          都创建在系统临时目录（mktemp），未在仓库内留下任何 *.sqlite3 文件，
+          仓库工作区 git status 为空 [实测]。
+
+
+结论分级标记（全文统一）：
+  [代码]   可直接在当前源码中定位的结论（附 文件:行号）。
+  [测试]   test_feedback.py 中存在对应断言/用例（附行号）；仅表示“测试里
+           这么断言”，是否通过另见第九节的实际运行记录，不把未运行的测试
+           写成通过。
+  [文档]   仅见于 README 的说法，并同时给出源码核对结果（一致时注明）。
+  [实测]   本次在临时目录真实执行公开命令观察到的 stdout / stderr / 退出码，
+           逐字结果见第四节与附录 B。
+  [推导]   由源码语义可必然推出、但本次未单独执行取证的结论。
+
+
+--------------------------------------------------------------------------------
+目录
+--------------------------------------------------------------------------------
+  一、命令入口与调用链
+  二、一次删除如何“确定目标”（编号解析、只定位评价、查找）
+  三、删除如何“保存结果”（DELETE + 提交、返回原对象、输出契约）
+  四、固定合成前置数据与完整执行示例
+  五、删除对后续查询与其它数据的影响
+  六、编号规则与失败边界（invalid / not_found / usage）
+  七、持久化、删空、重复删除与编号不复用
+  八、关键证据索引（文件:行号）
+  九、源码推导 / 测试断言 / 实际执行结果 的边界
+  附录 A：固定数据的完整搭建命令
+  附录 B：本次实测命令与逐字输出、退出码一览
+
+
+================================================================================
+一、命令入口与调用链
+================================================================================
+
+1. 命令行入口 [代码] recruiting/__main__.py:1-6：
+       import sys
+       from recruiting.cli import main
+       if __name__ == "__main__":
+           sys.exit(main())
+   进程退出码即 main() 的返回值，经 sys.exit 成为 shell 看到的退出码。
+
+2. main(argv=None) [代码] recruiting/cli.py:678-684：
+       args = build_parser().parse_args(argv)   # 679
+       conn = connect(args.db)                  # 680，必要时创建库/表
+       try:
+           return args.handler(conn, args)      # 682，分发到具体命令
+       finally:
+           conn.close()                         # 684
+   - delete-feedback 的处理函数在解析器中绑定为 cmd_delete_feedback
+     [代码] recruiting/cli.py:642-646（add_parser 后 set_defaults(handler=
+     cmd_delete_feedback)，见 646 行）。
+   - --feedback-id 注册为必填 [代码] recruiting/cli.py:645
+     （delete_feedback_parser.add_argument("--feedback-id", required=True)）。
+   - 全局 --db 必填、子命令必填 [代码] recruiting/cli.py:591-592。
+   - main 只有 try/finally、没有 except：业务契约之外的 sqlite3 异常会以
+     Python 回溯抛出，不属于本文描述的正常/字段错误出口。
+
+3. delete-feedback 处理函数 cmd_delete_feedback [代码]
+   recruiting/cli.py:444-469，完整调用链为：
+       参数解析(argparse)
+         -> args.feedback_id.strip() 去两端空白                 (454-456)
+         -> validate_candidate_id 校验“正整数(允许前导零)”      (454,147-155)
+         -> 失败：emit_error({"feedback_id": "invalid"}) -> 2   (457-459)
+         -> find_feedback 定位评价行（含 int64 上限/存在性）    (461;384-405)
+         -> 未找到：find_feedback 已输出 not_found -> return 2  (462-463)
+         -> DELETE FROM feedback WHERE id = ? + conn.commit()   (465-466)
+         -> 组装删除前原对象并打印单行 JSON -> return 0         (467-469)
+
+
+================================================================================
+二、一次删除如何“确定目标”
+================================================================================
+
+1. 只取一个参数 --feedback-id，先去两端空白
+   [代码] recruiting/cli.py:454-456：
+       feedback_id_error, feedback_id_int = validate_candidate_id(
+           args.feedback_id.strip()
+       )
+   即编号先做 str.strip()；两端空白被忽略，内部字符原样进入校验。
+
+2. 编号合法性由 validate_candidate_id 判定 [代码]
+   recruiting/cli.py:147-155：
+       if not re.fullmatch(r"[0-9]+", candidate_id) or int(candidate_id) < 1:
+           return "invalid", None
+       return None, int(candidate_id)
+   - 必须整体（fullmatch）由 ASCII 数字 [0-9] 组成，且转成整数后 >= 1。
+   - 因此接受：含前导零的 ASCII 正整数（"2"、"02"、"0002" 都解析为 2）。
+   - 拒绝 invalid：空串/纯空白（strip 后为空，fullmatch 失败）、全零
+     "0"/"000"（int 后 <1）、负数 "-1"、带正号 "+1"、小数 "1.5"
+     （正则不接受 '-' '+' '.'）、全角数字 "１２"（不在 ASCII [0-9]）。
+   该函数名虽为 candidate_id，但被评价相关命令复用；delete-feedback 在
+   recruiting/cli.py:454 调用它解析的是 feedback_id。
+
+3. 编号即使与某位“候选人 id”数值相同，也只定位“评价”
+   [代码] recruiting/cli.py:397-400 的查找语句查的是 feedback 表：
+       SELECT id, candidate_id, text FROM feedback WHERE id = ?
+   整条删除流程从不查询 candidates 表来决定删哪条；candidate_id 只是被
+   命中评价行里带回的归属列。因此 --feedback-id 2 的含义是“评价主键 id=2”，
+   与“候选人 id=2 是否存在”无关。
+   [文档] README.md:120-122 “按评价编号（取自已有评价结果，不是候选人
+   编号，即使编号数值与某位候选人 id 相同也只定位评价）”，与代码一致。
+   [测试] test_feedback.py:476-486（test_delete_returns_original_record）
+   显式断言候选人 2（周宁）存在，但删除编号 2 返回的 candidate_id 是
+   林晓的 id；set-feedback 侧同义断言见 test_feedback.py:326-329。
+
+4. 同文评价也只删除指定记录：定位条件只有主键 id = ?（等值、参数化），
+   不按 text 匹配，也没有 LIMIT 之外的批量删除。
+   [代码] recruiting/cli.py:397-400（按 id 取唯一行）、465
+   （DELETE ... WHERE id = ?）。故两条 text 完全相同的评价，删 id=2 只删
+   id=2 那一条，id=1 原样保留。[实测] 见第四节示例 2/示例 3。
+
+5. int64 上限与“合法但不存在”
+   find_feedback [代码] recruiting/cli.py:384-405：
+     - feedback_id_int > SQLITE_INT64_MAX（常量 9223372036854775807，
+       recruiting/cli.py:34）时，直接 emit {"feedback_id":"not_found"}
+       并返回 None（393-395），注释说明这是为了避免绑定参数时抛
+       OverflowError。故 9223372036854775808 归为 not_found 而非 invalid。
+     - 否则在 feedback 表按 id 查行（397-400）；fetchone() 为 None 时
+       emit {"feedback_id":"not_found"}（401-403）。
+   合法但当前不存在的编号（如 999、已删除的编号）都走这一支。
+
+
+================================================================================
+三、删除如何“保存结果”
+================================================================================
+
+1. 真正的删除与落盘 [代码] recruiting/cli.py:465-466：
+       conn.execute("DELETE FROM feedback WHERE id = ?", (feedback_id_int,))
+       conn.commit()
+   - 参数化绑定（无用户输入拼接到 SQL）。
+   - DELETE 在“校验通过 + 已查到行”之后才执行；任何错误出口都在此之前
+     return 2，故失败不产生删除、不需要回滚（见 457-463）。
+   - 紧接 conn.commit() 落盘，因此删除在进程结束、重开数据库后仍生效。
+
+2. 返回的是“被删记录的原对象”，且取自删除前查到的行
+   [代码] recruiting/cli.py:461 先把行读入 row，465 才删除，467 用 row
+   组装结果：
+       record = {"id": row[0], "candidate_id": row[1], "text": row[2]}
+       print(json.dumps(record, ensure_ascii=False))
+   - 仅含 id、candidate_id、text 三个字段（467），键序即此构造顺序。
+   - text 是保存时的原文：add-feedback 写入前会 strip 两端空白、保留内部
+     空白/换行（validate_feedback_text，recruiting/cli.py:307-317；
+     插入在 351-354），delete 不再做任何裁剪，只原样回显。
+   - json.dumps(..., ensure_ascii=False)：中文不转义；文本里的内部换行符
+     被 JSON 转义成字面两字符反斜杠+n（"\\n"），因此整条结果仍是单行，
+     不会被换行拆成多行（468）。
+   [测试] 单行与转义：test_feedback.py:466-474（assert_delete_success 断言
+   stdout.splitlines() 恰为 1 行、字段集合恰为三项）、488-500（含 "\\n"
+   与逐字文本）。
+
+3. 成功输出契约 [代码] recruiting/cli.py:467-469 + print 默认行为：
+   - 标准输出：单行 JSON 对象 + 一个行尾换行（print）。
+   - 标准错误：为空（成功路径不调用 emit_error）。
+   - 退出码：0（return 0，469）。
+   [文档] README.md:128-131 与之一致。
+   [实测] 见第四节示例 2、附录 B 各 rc=0 项（stderr 均为空串）。
+
+4. 字段错误输出契约（失败时）[代码] emit_error 定义于
+   recruiting/cli.py:61-68：
+       print(json.dumps({"errors": errors}, ensure_ascii=False,
+                        separators=separators), file=sys.stderr)
+   delete-feedback 以默认 compact=False 调用（458、394、402），故错误
+   JSON 带默认空格，形如 {"errors": {"feedback_id": "invalid"}}；只写
+   stderr，stdout 不打印任何内容，返回退出码 2。
+   [实测] stderr 逐字为 '{"errors": {"feedback_id": "invalid"}}\n'，
+   stdout 为 ''（见附录 B b01-b11）。
+
+5. 缺少 --feedback-id 的出口与上面不同：由 argparse 处理，不进入
+   cmd_delete_feedback。参数 required=True（recruiting/cli.py:645），
+   parse_args（679）直接向 stderr 打印 usage 用法说明并以退出码 2 终止，
+   stdout 为空。[实测] 见附录 B b14（usage 跨两行、含 "usage:" 字样，
+   不是 errors JSON）。
+   [测试] test_feedback.py:605-609 断言 returncode==2、stdout 为空、
+   stderr 含 "usage"。
+
+
+================================================================================
+四、固定合成前置数据与完整执行示例（均为本次真实执行 [实测]）
+================================================================================
+
+说明：以下示例在“同一个”全新数据库 demo.sqlite3 上顺序执行，以保证
+评价主键恰为 1、2、3。命令在仓库根目录运行；为避免污染仓库，本次把
+demo.sqlite3 放在系统临时目录，复现时可直接使用当前目录的 demo.sqlite3
+（README.md:11 的用法），输出相同。前置数据全部为合成资料：
+
+  候选人 1：name="林晓"  email="lin.xiao@example.test"
+            position="测试工程师"  stage="applied"（add 固定写入）
+  候选人 2：name="周宁"  email="zhou.ning@example.test"
+            position="测试工程师"  stage="applied"
+  评价 1：id=1, candidate_id=1, text="表达清楚"   （属于林晓）
+  评价 2：id=2, candidate_id=1, text="表达清楚"   （属于林晓，与评价 1 同文）
+  评价 3：id=3, candidate_id=2, text="周宁评价"   （属于周宁）
+
+为什么 id 确定：add 与 add-feedback 的主键均为 INTEGER PRIMARY KEY
+AUTOINCREMENT（candidates：recruiting/cli.py:12；feedback：25），在空库上
+按登记/追加顺序依次分配；add 成功回显 lastrowid（cmd_add 用
+cursor.lastrowid，95），add-feedback 同理（357）。[实测] 三次评价回显的
+id 依次为 1、2、3。
+stage 为 applied：add 不提供 --stage，阶段恒绑常量 STAGE_APPLIED="applied"
+（recruiting/cli.py:7、90）。
+
+示例 0 —— 搭建前置数据（完整命令见附录 A），关键回显 [实测]：
+  $ python -m recruiting --db demo.sqlite3 add \
+      --name "林晓" --email lin.xiao@example.test --position "测试工程师"
+  {"id": 1, "name": "林晓", "email": "lin.xiao@example.test", "position": "测试工程师", "stage": "applied"}
+  $ python -m recruiting --db demo.sqlite3 add \
+      --name "周宁" --email zhou.ning@example.test --position "测试工程师"
+  {"id": 2, "name": "周宁", "email": "zhou.ning@example.test", "position": "测试工程师", "stage": "applied"}
+  $ python -m recruiting --db demo.sqlite3 add-feedback --id 1 --text "表达清楚"
+  {"id": 1, "candidate_id": 1, "text": "表达清楚"}
+  $ python -m recruiting --db demo.sqlite3 add-feedback --id 1 --text "表达清楚"
+  {"id": 2, "candidate_id": 1, "text": "表达清楚"}
+  $ python -m recruiting --db demo.sqlite3 add-feedback --id 2 --text "周宁评价"
+  {"id": 3, "candidate_id": 2, "text": "周宁评价"}
+
+示例 1 —— 删除前查询（用于对照）[实测]：
+  $ python -m recruiting --db demo.sqlite3 list-feedback --id 1
+  [{"id": 1, "candidate_id": 1, "text": "表达清楚"}, {"id": 2, "candidate_id": 1, "text": "表达清楚"}]
+  $ python -m recruiting --db demo.sqlite3 list-feedback --id 2
+  [{"id": 3, "candidate_id": 2, "text": "周宁评价"}]
+
+示例 2 —— 核心删除命令 [实测]：
+  $ python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id 2
+
+  预期 / 实际完全一致：
+    退出码：0
+    标准错误：（空）
+    标准输出（单行 JSON，行尾一个换行）：
+  {"id": 2, "candidate_id": 1, "text": "表达清楚"}
+
+  逐字证据 [实测] stdout 的 repr 为
+    '{"id": 2, "candidate_id": 1, "text": "表达清楚"}\n'
+  stderr 的 repr 为 ''。
+  解读：编号 2 与候选人 id 2（周宁）数值相等，但定位的是 feedback 表主键
+  id=2（recruiting/cli.py:397-400），该评价属于候选人 1（林晓），故
+  candidate_id 为 1；返回的是删除前原文（461、467）。同文的评价 1 不受
+  影响（DELETE 只按主键，465）。
+
+示例 3 —— 删除后的查询命令与结果 [实测]：
+  $ python -m recruiting --db demo.sqlite3 list-feedback --id 1
+  [{"id": 1, "candidate_id": 1, "text": "表达清楚"}]
+  （林晓只剩评价 1 的原对象；评价 2 已不在；仍按评价 id 升序，仅剩一项）
+
+  $ python -m recruiting --db demo.sqlite3 list-feedback --id 2
+  [{"id": 3, "candidate_id": 2, "text": "周宁评价"}]
+  （周宁本人与其评价 3 均不变）
+
+  对照源码：list-feedback 的 SQL 为
+      SELECT id, candidate_id, text FROM feedback
+       WHERE candidate_id = ? ORDER BY id ASC
+  [代码] recruiting/cli.py:371-375；删除后候选人 1 的匹配行少一条，
+  候选人 2 的匹配行不变。
+
+示例 4 —— 内部换行的文本，删除回显时经 JSON 转义、仍为单行 [实测]：
+  对仅有一条评价 text 为 'Line TWO 二行  \n继续'（两端空白在追加时被
+  strip、内部换行保留）的库执行：
+  $ python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id 1
+  标准输出（物理上只有 1 行，repr 中可见 \n 被转义成字面 \\n）：
+    {"id": 1, "candidate_id": 1, "text": "Line TWO 二行  \n继续"}
+  其 stdout 的 repr 为
+    '{"id": 1, "candidate_id": 1, "text": "Line TWO 二行  \\n继续"}\n'
+  wc -l 计数为 1。依据：json.dumps 把真实换行符序列化为 \n 转义
+  （recruiting/cli.py:468），print 仅在末尾补一个换行。
+
+
+================================================================================
+五、删除对后续查询与其它数据的影响
+================================================================================
+
+1. list-feedback：少一条，其余的编号/文字/归属/升序不变
+   [代码] recruiting/cli.py:365-381（只读 SELECT，WHERE candidate_id=?
+   ORDER BY id ASC）。删除评价 2 后 [实测]：
+     list-feedback --id 1 -> 只剩 [评价1]（示例 3）；
+     list-feedback --id 2 -> 仍是 [评价3]。
+   [测试] test_feedback.py:484-486、530-532、554-557。
+
+2. 候选人资料不变：delete-feedback 只 DELETE feedback 表
+   （recruiting/cli.py:465），不写 candidates 表。删除前后 get 结果逐字
+   一致 [实测]：
+     get --id 1 -> {"id": 1, ..., "stage": "applied"}（前后相同）
+     get --id 2 -> {"id": 2, ..., "stage": "applied"}（前后相同）
+   特别地，删掉某人最后一条评价后，候选人仍存在（见第七节第 3 点）。
+
+3. 阶段历史不变：delete-feedback 不触碰 stage_history 表。
+   [实测] 删除前后 stage-history --id 1 均为 []。
+   [测试] test_feedback.py:597-599（删除类失败场景下历史仍为 []）。
+   [推导] 本例两名候选人从未 set-stage 成不同阶段，历史本就为空；删除
+   评价不会新增或删除历史（cmd_delete_feedback 内无 stage_history 写入，
+   recruiting/cli.py:444-469）。
+
+4. 岗位统计不变：summary 只读 candidates 并按 position/stage 分组
+   [代码] recruiting/cli.py:521-533、572-586；feedback 行数不参与统计。
+   [实测] 删除 2 前后 summary --position "测试工程师" 逐字一致：
+     {"position": "测试工程师", "total": 2,
+      "counts": {"applied": 2, "interviewing": 0, "hired": 0, "rejected": 0}}
+   [测试] test_feedback.py:586、600-603（删除失败不改变统计的断言）。
+
+5. 对 set-feedback 的影响：被删编号再更正按“评价不存在”处理。
+   [代码] set-feedback 同样先 find_feedback（recruiting/cli.py:430），
+   已删除行 fetchone 为 None -> not_found（401-403）。
+   [实测] 删除评价 3 后执行
+     set-feedback --feedback-id 3 --text "新文字"
+   -> rc=2，stdout 空，stderr：
+     {"errors": {"feedback_id": "not_found"}}
+   [测试] test_feedback.py:534-544。
+
+6. 对 add-feedback 的影响：后续追加得到“新的、更大的”主键，不复用被删
+   编号（详见第七节第 4 点）。
+
+7. 失败操作零副作用：invalid/not_found 都在 DELETE（465 行）之前返回，
+   不改动任何评价、候选人、历史或统计。[测试] test_feedback.py:582-603
+   在一连串非法/不存在调用后断言两类查询与 get/history/summary 快照不变；
+   [实测] 见第六节边界表后的 b12/b13 复查。
+
+
+================================================================================
+六、编号规则与失败边界
+================================================================================
+
+合法形式（去两端空白后）[代码] recruiting/cli.py:153 的
+re.fullmatch(r"[0-9]+", ...) 且 int(...) >= 1：
+  - "2"、"02"、"0002"、"  2  "（strip 后为 "2"）、"  0003  " 都合法，
+    归一为同一个整数主键。[实测] "  0003  " 成功删除评价 3（附录 B #30）。
+  - 注意：前导零只影响“能否解析”，不改变定位的整数；不存在“02 号评价”
+    与“2 号评价”两条记录。
+
+失败分三类，出口不同：
+
+(A) feedback_id = invalid —— 语法层不合法
+    [代码] recruiting/cli.py:454-459 + 153；错误 JSON 经 emit_error
+    （61-68）写 stderr，return 2。
+    覆盖输入（本次逐项实测，全部 rc=2、stdout=''、stderr 单行）：
+      空值 ""、纯空白 "   "、非数字 "abc"、全零 "0"/"000"、负数 "-1"、
+      带正号 "+1"、小数 "1.5"、非 ASCII 全角数字 "１２"。
+    stderr 逐字（每个均相同）：
+      {"errors": {"feedback_id": "invalid"}}
+    [测试] test_feedback.py:563-569 以同一组输入参数化断言 invalid。
+
+(B) feedback_id = not_found —— 语法合法但记录不存在
+    [代码] recruiting/cli.py:393-403（>int64 上限或 SELECT 未命中）。
+      - 合法但当前不存在：--feedback-id 999
+      - 超 SQLite int64 上限：--feedback-id 9223372036854775808
+        （上限常量 SQLITE_INT64_MAX=9223372036854775807，
+          recruiting/cli.py:34；超限在 393-395 直接判 not_found，避免
+          参数绑定 OverflowError）
+      - 曾存在但已被删除的编号（如成功删除后再次删同一 id）。
+    stderr 逐字：
+      {"errors": {"feedback_id": "not_found"}}
+    rc=2、stdout=''。[实测] 见附录 B b10/b11/#27/#33。
+    [测试] test_feedback.py:571-579、521-532。
+
+(C) 缺少 --feedback-id —— argparse 用法错误
+    [代码] 必填注册 recruiting/cli.py:645；parse_args（679）直接终止，
+    不进入 cmd_delete_feedback。rc=2、stdout 为空，stderr 为 usage
+    用法说明（不是 errors JSON）。
+    [实测] stderr（Python 3.14.4，两行）逐字：
+      usage: recruiting delete-feedback [-h] --feedback-id FEEDBACK_ID
+      recruiting delete-feedback: error: the following arguments are required: --feedback-id
+    usage 的逐字措辞依赖 Python 版本，[推导] 其它版本排版可能略有差异，
+    但退出码 2、stdout 空、stderr 含用法说明这一契约由 argparse 保证。
+    [测试] test_feedback.py:605-609。
+
+字段错误的统一形状：无论是 invalid 还是 not_found，标准错误都是“单行、
+单个” errors JSON（键为 "errors"，其内只有 "feedback_id" 一个键），
+标准输出为空，退出码 2。单行性 [实测]：splitlines() 恰为 1 行；
+[测试] 通用断言 assert_failure 见 test_feedback.py:85-90。delete-feedback
+只有一个字段，因此不会出现多字段合并（多字段合并是 add-feedback /
+set-feedback 的行为，见 test_feedback.py:140-145、364-369）。
+
+失败后已有记录不变 [实测]：在 boundary.sqlite3 上依次执行
+""、"   "、"abc"、"0"、"000"、"-1"、"+1"、"1.5"、"１２"、"999"、
+"9223372036854775808" 全部失败后：
+  list-feedback --id 1 -> [评价1, 评价2]（未变）
+  list-feedback --id 2 -> [评价3]（未变）
+[代码] 原因是这些分支都在 DELETE（recruiting/cli.py:465）之前返回。
+
+
+================================================================================
+七、持久化、删空、重复删除与编号不复用
+================================================================================
+
+1. 重开同一数据库后删除仍生效（持久化）
+   机制：成功删除后立即 conn.commit()（recruiting/cli.py:466）；每次
+   `python -m recruiting` 都是独立进程，main 以同一 --db 重新
+   sqlite3.connect（680；connect 在 53-58），建表用 CREATE TABLE IF NOT
+   EXISTS（SCHEMA，10-29；executescript 在 56）对已存在的表是空操作，
+   已提交的 DELETE 结果保留在文件中。
+   [实测] 删除 2、3 并追加评价 4 后，用“新的一次进程”再次查询：
+     list-feedback --id 1 -> [评价1, 评价4]
+     list-feedback --id 2 -> []
+   与删除当次结果逐字一致。
+   [测试] test_feedback.py:511-519（两次独立调用结果一致）。
+   [文档] README.md:131-132。
+
+2. 再次删除同一编号 -> not_found
+   [代码] 第二次执行时 feedback 表已无该行，find_feedback 走 401-403。
+   [实测] 成功删评价 2 后再删一次 2：rc=2、stdout 空、stderr
+   {"errors": {"feedback_id": "not_found"}}；且这次失败不动其余记录
+   （评价 1、3 复查不变）。[测试] test_feedback.py:521-532。
+
+3. 最后一条评价被删后：查询为 []，但候选人仍存在
+   [实测] 用 "  0003  " 删除周宁唯一的评价 3 后：
+     list-feedback --id 2 -> []（退出码 0，非错误）
+     get --id 2           -> 仍是周宁的候选人对象（id=2，applied）
+   [代码] list-feedback 对“候选人存在但无评价”返回空数组：
+   recruiting/cli.py:371-380（fetchall 为空 -> records=[] -> 打印 []）；
+   delete 只删 feedback（465），candidates 行保留。
+   [测试] test_feedback.py:502-509。
+   [文档] README.md:130-131。
+
+4. 后续追加不复用已删编号（AUTOINCREMENT 继续递增）
+   [代码] feedback 主键为 INTEGER PRIMARY KEY AUTOINCREMENT
+   （recruiting/cli.py:24-28）。SQLite 对 AUTOINCREMENT 在内部
+   sqlite_sequence 表记录单调游标，删除行不会回退，故新插入取更大值。
+   [实测] 删除 2、3 之后再为林晓追加一条：
+     add-feedback --id 1 --text "新评价"
+     -> {"id": 4, "candidate_id": 1, "text": "新评价"}
+   新 id=4 > 已存在过的最大 id 3，没有复用被删的 2 或 3；随后
+     list-feedback --id 1 -> [评价1, 评价4]（按 id 升序）
+   底层佐证 [实测]：直接只读查询该库，
+     sqlite_sequence 中 feedback 的 seq=4，
+     feedback 表实际行为 (1,1,'表达清楚') 与 (4,1,'新评价')，
+     candidates 仍为 1 林晓、2 周宁，stage_history 为空。
+   [测试] test_feedback.py:546-557（断言新 id 大于第三人评价 id，
+   列表为 [first, new_record]）。
+   [文档] README.md:132-134（明确“不复用已删除编号（AUTOINCREMENT
+   继续递增）”）。
+
+5. 其余评价及候选人资料、阶段历史、岗位统计均不变
+   汇总 [实测]：删除 2 与删除 3 两组操作后——
+     - 未被点名的评价（评价 1，以及各自时点的评价 3/1）编号、文字、
+       candidate_id 归属、升序位置均不变；
+     - get 两名候选人结果与删除前逐字一致；
+     - stage-history 仍为 []；
+     - summary "测试工程师" 仍为 total=2、applied=2 其余 0。
+   源码依据：cmd_delete_feedback 仅有一条针对 feedback 表单行的
+   DELETE（recruiting/cli.py:465），无其它表写操作（444-469）。
+   [文档] README.md:134-135。
+
+
+================================================================================
+八、关键证据索引（文件:行号）
+================================================================================
+
+recruiting/__main__.py:1-6     命令行入口、sys.exit(main())
+recruiting/__init__.py:3       导出 main
+recruiting/cli.py:7            STAGE_APPLIED = "applied"
+recruiting/cli.py:10-29        SCHEMA：candidates / stage_history / feedback
+                                三张表，主键均 INTEGER PRIMARY KEY AUTOINCREMENT
+recruiting/cli.py:24-28        feedback 表定义（id AUTOINCREMENT,
+                                candidate_id, text）
+recruiting/cli.py:34           SQLITE_INT64_MAX = 9223372036854775807
+recruiting/cli.py:53-58        connect：打开/创建库、幂等建表、commit
+recruiting/cli.py:61-68        emit_error：errors JSON -> stderr
+recruiting/cli.py:147-155      validate_candidate_id：ASCII 正整数(允许前导零)
+recruiting/cli.py:307-317      validate_feedback_text：strip 两端、保留内部
+                                空白/换行（决定被删回显文本的来源形态）
+recruiting/cli.py:351-362      add-feedback：INSERT feedback + commit、回显 id
+recruiting/cli.py:365-381      cmd_list_feedback：WHERE candidate_id=?
+                                ORDER BY id ASC；无评价返回 []
+recruiting/cli.py:384-405      find_feedback：int64 上限与按 id 存在性，
+                                未命中输出 feedback_id not_found
+recruiting/cli.py:397-400      SELECT id,candidate_id,text FROM feedback
+                                WHERE id=?（编号只定位评价的关键语句）
+recruiting/cli.py:408-441      cmd_set_feedback（删除后再更正走 not_found）
+recruiting/cli.py:444-469      cmd_delete_feedback：strip/校验/find/
+                                DELETE+commit/回显原对象/return 0
+recruiting/cli.py:454-456      feedback_id.strip() + validate_candidate_id
+recruiting/cli.py:457-459      invalid -> {"feedback_id":"invalid"} -> 2
+recruiting/cli.py:461-463      find_feedback 失败 -> return 2（在 DELETE 前）
+recruiting/cli.py:465-466      DELETE FROM feedback WHERE id=? + commit
+recruiting/cli.py:467-469      组装删除前原对象、单行 JSON、return 0
+recruiting/cli.py:521-533      岗位统计只读 candidates（删除评价不影响）
+recruiting/cli.py:642-646      delete-feedback 子解析器与 --feedback-id
+                                required=True（645）、handler 绑定（646）
+recruiting/cli.py:678-684      main：parse_args/connect/分发/finally close
+
+README.md:35-36                 delete-feedback 用法行
+README.md:120-135              delete-feedback 行为契约（编号语义、边界、
+                                输出、删空、持久化、不复用、不影响其它数据）
+README.md:93-100               list-feedback 输出与按 id 升序、空为 []
+
+test_feedback.py:85-90         assert_failure：rc=2、stdout 空、stderr 单行
+                                errors JSON
+test_feedback.py:445-459       DeleteFeedbackTests 固定前置（评价1/2 林晓
+                                同文，评价3 周宁）
+test_feedback.py:466-474       成功：rc0、stderr 空、stdout 单行、仅三字段
+test_feedback.py:476-486       编号相等仍只定位评价 + 删除后列表归属
+test_feedback.py:488-500       内部换行 JSON 转义、逐字文本
+test_feedback.py:502-509       删最后一条 -> [] 但候选人仍存在
+test_feedback.py:511-519       跨重开持久化
+test_feedback.py:521-532       重复删除同一编号 -> not_found
+test_feedback.py:534-544       删除后 set-feedback 同编号 -> not_found
+test_feedback.py:546-557       后续追加不复用编号、升序不变
+test_feedback.py:559-561       前导零 + 两端空白删除成功
+test_feedback.py:563-569       invalid 输入组（空/全零/负/正号/小数/全角）
+test_feedback.py:571-579       not_found：999 与 9223372036854775808
+test_feedback.py:582-603       失败不改评价/候选人/历史/统计
+test_feedback.py:605-609       缺 --feedback-id 为 usage 错误（rc2/
+                                stdout 空/stderr 含 usage）
+
+
+================================================================================
+九、源码推导 / 测试断言 / 实际执行结果 的边界
+================================================================================
+
+1. 仅由源码即可确定 [代码]：参数必填与解析位置、strip 与 ASCII 正整数
+   规则、按 feedback 主键定位（不查 candidates）、int64 上限归类、
+   DELETE 只作用于 feedback 单行且在所有错误分支之后、成功输出三字段
+   单行 JSON 与退出码 0、字段错误走 stderr/退出码 2、缺选项走 argparse
+   usage。这些结论不依赖运行即可成立。
+
+2. 测试源码“存在断言”但断言不等于已通过 [测试]：第八节所列
+   test_feedback.py 行号仅说明仓库里写了这些检查。本文不把“读到断言”
+   表述为“测试通过”。
+
+3. 本次实际运行结果（区分于断言）[实测]：
+   - 公开命令手测：第四节示例 0-4、第五/六/七节引用的所有现象，均在
+     /tmp 下三个临时库（demo.sqlite3、boundary.sqlite3、newline.sqlite3）
+     真实执行，逐字 stdout/stderr/退出码见附录 B；复现脚本见附录 A。
+   - 自动化测试：本次真实执行了
+       python3 -m unittest test_feedback -v
+     结果：Ran 47 tests ... OK，退出码 0（DeleteFeedbackTests 等 13 个
+     删除相关用例均 ok）。
+     并真实执行了全量
+       python3 -m unittest discover
+     结果：Ran 228 tests in 146.7s ... OK，退出码 0。
+     即：相关测试在本次环境（Python 3.14.4 / SQLite 3.46.1）下确实运行
+     并通过——这是“实际执行结果”，不是从断言推断。
+   - 仍属环境相关、可能随版本变化者：argparse usage 的逐字排版
+     （本次抓到 Python 3.14.4 的两行文本，见附录 B b14）；中文与字节的
+     终端呈现。退出码/流向/单行 JSON 等契约不受影响。
+
+4. 未做的事：未修改任何产品代码、README 或数据库结构；未在仓库内创建
+   数据库（*.sqlite3 已被 .gitignore:6-8 忽略）；git status 工作区为空
+   [实测]。临时库位于 /tmp，可随时删除，不影响使用者数据。
+
+
+--------------------------------------------------------------------------------
+附录 A：固定合成数据的完整搭建命令（全新空库，按序执行）
+--------------------------------------------------------------------------------
+# 在仓库根目录；把 demo.sqlite3 放在你自选的目录（README 示例用当前目录）
+python -m recruiting --db demo.sqlite3 add \
+  --name "林晓" --email lin.xiao@example.test --position "测试工程师"
+python -m recruiting --db demo.sqlite3 add \
+  --name "周宁" --email zhou.ning@example.test --position "测试工程师"
+python -m recruiting --db demo.sqlite3 add-feedback --id 1 --text "表达清楚"
+python -m recruiting --db demo.sqlite3 add-feedback --id 1 --text "表达清楚"
+python -m recruiting --db demo.sqlite3 add-feedback --id 2 --text "周宁评价"
+
+# 核心删除
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id 2
+# 预期 stdout（退出码 0、stderr 空、单行）：
+# {"id": 2, "candidate_id": 1, "text": "表达清楚"}
+
+# 删除后查询
+python -m recruiting --db demo.sqlite3 list-feedback --id 1
+# [{"id": 1, "candidate_id": 1, "text": "表达清楚"}]
+python -m recruiting --db demo.sqlite3 list-feedback --id 2
+# [{"id": 3, "candidate_id": 2, "text": "周宁评价"}]
+
+# 其它不受影响的只读核对
+python -m recruiting --db demo.sqlite3 get --id 1
+python -m recruiting --db demo.sqlite3 get --id 2
+python -m recruiting --db demo.sqlite3 stage-history --id 1      # []
+python -m recruiting --db demo.sqlite3 summary --position "测试工程师"
+# {"position": "测试工程师", "total": 2, "counts": {"applied": 2,
+#  "interviewing": 0, "hired": 0, "rejected": 0}}
+
+# 边界（失败；退出码 2、stdout 空、stderr 单行 errors JSON）
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id ""      # invalid
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id "0"     # invalid
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id "-1"    # invalid
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id "+1"    # invalid
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id "1.5"   # invalid
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id "１２"   # invalid
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id 999     # not_found
+python -m recruiting --db demo.sqlite3 delete-feedback \
+  --feedback-id 9223372036854775808                                          # not_found
+python -m recruiting --db demo.sqlite3 delete-feedback                       # usage
+
+# 删最后一条 / 重开持久化 / 重复删除 / 追加不复用
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id "  0003  "
+python -m recruiting --db demo.sqlite3 list-feedback --id 2                  # []
+python -m recruiting --db demo.sqlite3 get --id 2                            # 周宁仍在
+python -m recruiting --db demo.sqlite3 delete-feedback --feedback-id 3       # not_found
+python -m recruiting --db demo.sqlite3 add-feedback --id 1 --text "新评价"    # id=4
+python -m recruiting --db demo.sqlite3 list-feedback --id 1
+# [{"id": 1, "candidate_id": 1, "text": "表达清楚"},
+#  {"id": 4, "candidate_id": 1, "text": "新评价"}]
+
+
+--------------------------------------------------------------------------------
+附录 B：本次实测逐条记录（stdout/stderr 以 repr 表示，[实测]）
+--------------------------------------------------------------------------------
+环境：Python 3.14.4、SQLite 3.46.1；rc 为进程退出码；'' 表示空串；
+所有 repr 末尾的 \n 是 print 追加的单个行尾换行。
+
+[前置库 demo.sqlite3]
+ #01 add 林晓            rc0  stdout {"id": 1, "name": "林晓", ... "stage": "applied"}\n  stderr ''
+ #02 add 周宁            rc0  stdout {"id": 2, "name": "周宁", ... "stage": "applied"}\n  stderr ''
+ #03 add-feedback 1      rc0  stdout '{"id": 1, "candidate_id": 1, "text": "表达清楚"}\n'  stderr ''
+ #04 add-feedback 1      rc0  stdout '{"id": 2, "candidate_id": 1, "text": "表达清楚"}\n'  stderr ''
+ #05 add-feedback 2      rc0  stdout '{"id": 3, "candidate_id": 2, "text": "周宁评价"}\n'  stderr ''
+ #06 list-feedback 1     rc0  '[...,{id:1...},{id:2...}]'（评价1,2）  stderr ''
+ #07 list-feedback 2     rc0  '[{id:3,candidate_id:2,...}]'           stderr ''
+ #10/#11 get 1/2         rc0  删除前候选人对象（stage applied）       stderr ''
+ #12 stage-history 1     rc0  '[]\n'                                   stderr ''
+ #13 summary 测试工程师   rc0  '{"position": "测试工程师", "total": 2,
+                          "counts": {"applied": 2, "interviewing": 0,
+                           "hired": 0, "rejected": 0}}\n'             stderr ''
+ #20 delete-feedback 2   rc0  '{"id": 2, "candidate_id": 1,
+                          "text": "表达清楚"}\n'                        stderr ''
+ #21 list-feedback 1     rc0  '[{"id": 1, "candidate_id": 1,
+                          "text": "表达清楚"}]\n'                       stderr ''
+ #22 list-feedback 2     rc0  '[{"id": 3, "candidate_id": 2,
+                          "text": "周宁评价"}]\n'                       stderr ''
+ #23/#24 get 1/2         rc0  与 #10/#11 逐字一致                      stderr ''
+ #25 stage-history 1     rc0  '[]\n'（与 #12 一致）                    stderr ''
+ #26 summary             rc0  与 #13 逐字一致                          stderr ''
+ #27 delete-feedback 2   rc2  stdout ''  stderr
+                          '{"errors": {"feedback_id": "not_found"}}\n'
+ #30 delete "  0003  "   rc0  '{"id": 3, "candidate_id": 2,
+                          "text": "周宁评价"}\n'                        stderr ''
+ #31 list-feedback 2     rc0  '[]\n'                                   stderr ''
+ #32 get 2               rc0  周宁对象仍在（stage applied）            stderr ''
+ #33 delete-feedback 3   rc2  stdout ''  stderr
+                          '{"errors": {"feedback_id": "not_found"}}\n'
+ #34 set-feedback 3 新文字 rc2 stdout '' stderr
+                          '{"errors": {"feedback_id": "not_found"}}\n'
+ #35 add-feedback 1 新评价 rc0 '{"id": 4, "candidate_id": 1,
+                          "text": "新评价"}\n'                          stderr ''
+ #36 list-feedback 1     rc0  '[评价1, 评价4]'（id 升序）             stderr ''
+ #37 list-feedback 2     rc0  '[]\n'                                   stderr ''
+ #38/#39 新进程重开查询   rc0  与 #36/#37 逐字一致                     stderr ''
+ 只读核对 sqlite_sequence：feedback seq=4；feedback 行=(1,1,'表达清楚')、
+                          (4,1,'新评价')；candidates=林晓1/周宁2；
+                          stage_history 为空。
+
+[边界库 boundary.sqlite3（前置同为评价1/2/3）]
+ b01 --feedback-id ""      rc2 stdout '' stderr '{"errors": {"feedback_id": "invalid"}}\n'
+ b02 --feedback-id "   "   rc2 stdout '' 同上（invalid）
+ b03 "abc"                 rc2 stdout '' 同上（invalid）
+ b04 "0"                   rc2 stdout '' 同上（invalid）
+ b05 "000"                 rc2 stdout '' 同上（invalid）
+ b06 "-1"                  rc2 stdout '' 同上（invalid）
+ b07 "+1"                  rc2 stdout '' 同上（invalid）
+ b08 "1.5"                 rc2 stdout '' 同上（invalid）
+ b09 "１２"（全角）         rc2 stdout '' 同上（invalid）
+ b10 "999"                 rc2 stdout '' stderr '{"errors": {"feedback_id": "not_found"}}\n'
+ b11 "9223372036854775808" rc2 stdout '' stderr '{"errors": {"feedback_id": "not_found"}}\n'
+ b12 list-feedback 1       rc0 仍为 [评价1, 评价2]（失败均未落盘）
+ b13 list-feedback 2       rc0 仍为 [评价3]
+ b14 省略 --feedback-id    rc2 stdout '' stderr（两行，逐字）:
+   'usage: recruiting delete-feedback [-h] --feedback-id FEEDBACK_ID\n
+    recruiting delete-feedback: error: the following arguments are required: --feedback-id\n'
+
+[换行库 newline.sqlite3]
+ n1 add-feedback 文本含内部换行  rc0 stdout 单行，repr
+   '{"id": 1, "candidate_id": 1, "text": "Line TWO 二行  \\n继续"}\n'（物理 1 行）
+ n2 delete-feedback 1            rc0 stdout 与 n1 逐字相同（\n 被转义，物理 1 行） stderr ''
+ n3 list-feedback 1             rc0 '[]\n' stderr ''
+
+[自动化测试，本次真实执行]
+ python3 -m unittest test_feedback -v  -> Ran 47 tests ... OK，退出码 0
+ python3 -m unittest discover         -> Ran 228 tests in 146.7s ... OK，退出码 0
+
+================================================================================
+说明结束
+================================================================================
