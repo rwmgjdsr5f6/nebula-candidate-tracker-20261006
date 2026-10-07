@@ -20,6 +20,9 @@ python -m recruiting --db demo.sqlite3 list --position "测试工程师" --name 
 # 按 id 修改候选人阶段（applied/interviewing/hired/rejected 均可互转）
 python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
 
+# 按 id 查看候选人阶段变更历史（JSON 数组，按发生顺序）
+python -m recruiting --db demo.sqlite3 stage-history --id 1
+
 # 按岗位汇总各阶段人数（单个对象）
 python -m recruiting --db demo.sqlite3 summary --position "测试工程师"
 
@@ -48,6 +51,21 @@ python -m recruiting --db demo.sqlite3 summary --all-positions
 `errors` 对象，先完成参数校验再查找记录；错误退出码均为 2、标准输出为空，
 且不改动任何记录。成功时标准输出为更新后的候选人 JSON 对象，阶段之间允许
 任意互转，重复设置当前阶段也按成功处理。
+
+每次成功改成不同阶段时，变更前后的阶段会按发生顺序追加到该候选人的阶段
+历史；重复设置当前阶段不增加历史，登记时的 `applied` 也不算变更。历史保存
+在数据库中，重启后结果一致；姓名、邮箱或岗位更正不改变历史归属，也不增加
+历史。已有数据库直接可用：首次变更以当时保存的阶段为起点，不补造过去历史，
+未变更过的候选人历史为空。
+
+`stage-history` 按 id 查询阶段变更历史，`--id` 必填，id 规则与 `set-stage`
+相同（去除两端空白，仅接受 ASCII 数字组成的正整数，允许前导零）。成功时
+标准输出为单行 JSON 数组，每项只含 `from_stage` 和 `to_stage` 两个字符串
+字段，按发生顺序排列，标准错误为空，退出码为 0；查询不改动任何记录或统计。
+非法 id 返回 `{"errors": {"id": "invalid"}}`，合法但不存在的 id（含
+9223372036854775808）返回 `{"errors": {"id": "not_found"}}`：错误仅向标准
+错误输出单行 JSON，标准输出为空，退出码为 2；缺少 `--id` 时标准错误为用法
+说明，标准输出为空，退出码为 2。
 
 `set-position` 的岗位沿用登记规则：去除两端空白后为空返回 `required`，
 内部空白与大小写原样保存；id 规则与 `set-stage` 相同。参数错误合并为一个

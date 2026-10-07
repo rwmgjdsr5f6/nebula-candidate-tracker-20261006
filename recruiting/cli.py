@@ -14,6 +14,12 @@ CREATE TABLE IF NOT EXISTS candidates (
     email TEXT NOT NULL,
     position TEXT NOT NULL,
     stage TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS stage_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id INTEGER NOT NULL,
+    from_stage TEXT NOT NULL,
+    to_stage TEXT NOT NULL
 )
 """
 
@@ -42,7 +48,7 @@ def email_is_invalid(email):
 def connect(db_path):
     """打开（必要时创建）数据库并确保表结构存在。"""
     conn = sqlite3.connect(db_path)
-    conn.execute(SCHEMA)
+    conn.executescript(SCHEMA)
     conn.commit()
     return conn
 
@@ -144,7 +150,8 @@ def validate_candidate_id(candidate_id):
     return None, int(candidate_id)
 
 
-def update_candidate_field(conn, candidate_id, field, value, validate_field):
+def update_candidate_field(conn, candidate_id, field, value, validate_field,
+                           after_update=None):
     """set-stage、set-email、set-position 与 set-name 共用的按 id 更新流程。
 
     先合并完成 id 与字段值的全部校验，再查找记录；任一步失败都只输出
@@ -153,7 +160,9 @@ def update_candidate_field(conn, candidate_id, field, value, validate_field):
     提交后输出更新后的完整候选人 JSON，返回 0。
 
     validate_field 入参为已去空白的字段值，通过返回 None，否则返回
-    该字段的错误值（"required" 或 "invalid"）。
+    该字段的错误值（"required" 或 "invalid"）。after_update 可选，
+    在 UPDATE 之后、提交之前以 (conn, 更新前记录 dict, 新值) 调用，
+    用于在同一事务内登记阶段历史等附带写入。
     """
     errors = {}
     id_error, candidate_id_int = validate_candidate_id(candidate_id)
@@ -183,6 +192,8 @@ def update_candidate_field(conn, candidate_id, field, value, validate_field):
         "UPDATE candidates SET {} = ? WHERE id = ?".format(field),
         (value, candidate_id_int),
     )
+    if after_update is not None:
+        after_update(conn, dict(zip(FIELDS, row)), value)
     conn.commit()
 
     record = dict(zip(FIELDS, row))
@@ -224,6 +235,20 @@ def validate_stage(stage):
     return None
 
 
+def record_stage_history(conn, record, new_stage):
+    """阶段实际改成不同值时，按发生顺序追加一条变更前后的历史。
+
+    重复设置当前阶段不增加历史；登记时的 applied 也不在此记录。
+    """
+    old_stage = record["stage"]
+    if old_stage != new_stage:
+        conn.execute(
+            "INSERT INTO stage_history (candidate_id, from_stage, to_stage)"
+            " VALUES (?, ?, ?)",
+            (record["id"], old_stage, new_stage),
+        )
+
+
 def cmd_set_stage(conn, args):
     return update_candidate_field(
         conn,
@@ -231,7 +256,41 @@ def cmd_set_stage(conn, args):
         "stage",
         args.stage.strip(),
         validate_stage,
+        after_update=record_stage_history,
     )
+
+
+def cmd_stage_history(conn, args):
+    """按 id 查看候选人的阶段变更历史，只读查询，不改动任何记录。"""
+    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
+    if id_error is not None:
+        emit_error({"id": id_error})
+        return 2
+
+    if candidate_id_int > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"id": "not_found"})
+        return 2
+    row = conn.execute(
+        "SELECT id FROM candidates WHERE id = ?",
+        (candidate_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"id": "not_found"})
+        return 2
+
+    rows = conn.execute(
+        "SELECT from_stage, to_stage FROM stage_history"
+        " WHERE candidate_id = ? ORDER BY id ASC",
+        (candidate_id_int,),
+    ).fetchall()
+    history = [
+        {"from_stage": from_stage, "to_stage": to_stage}
+        for from_stage, to_stage in rows
+    ]
+    print(json.dumps(history, ensure_ascii=False))
+    return 0
 
 
 def validate_email(email):
@@ -358,6 +417,12 @@ def build_parser():
     set_stage_parser.add_argument("--id", required=True)
     set_stage_parser.add_argument("--stage", required=True)
     set_stage_parser.set_defaults(handler=cmd_set_stage)
+
+    stage_history_parser = subparsers.add_parser(
+        "stage-history", help="按 id 查看候选人阶段变更历史"
+    )
+    stage_history_parser.add_argument("--id", required=True)
+    stage_history_parser.set_defaults(handler=cmd_stage_history)
 
     set_email_parser = subparsers.add_parser("set-email", help="按 id 更正候选人邮箱")
     set_email_parser.add_argument("--id", required=True)
