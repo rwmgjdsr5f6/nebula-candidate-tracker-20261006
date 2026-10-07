@@ -283,13 +283,8 @@ def cmd_set_name(conn, args):
     )
 
 
-def cmd_summary(conn, args):
-    position = args.position.strip()
-
-    if not position:
-        emit_error({"position": "required"})
-        return 2
-
+def summary_for_position(conn, position):
+    """单个岗位的各阶段人数汇总，未出现的阶段计 0。"""
     rows = conn.execute(
         "SELECT stage, COUNT(*) FROM candidates WHERE position = ? GROUP BY stage",
         (position,),
@@ -298,9 +293,41 @@ def cmd_summary(conn, args):
     for stage, count in rows:
         if stage in counts:
             counts[stage] = count
-    total = sum(counts.values())
+    return {"position": position, "total": sum(counts.values()), "counts": counts}
 
-    result = {"position": position, "total": total, "counts": counts}
+
+def cmd_summary(conn, args):
+    if args.all_positions:
+        # 一次汇总全部岗位：按当前岗位、阶段分组，只保留至少有一名候选人的
+        # 岗位；岗位更正后旧岗位若无候选人自然不再出现。默认 BINARY 分组
+        # 区分大小写与内部空白；名称按 Unicode 码点升序在 Python 侧排序。
+        rows = conn.execute(
+            "SELECT position, stage, COUNT(*) FROM candidates"
+            " GROUP BY position, stage"
+        ).fetchall()
+        grouped = {}
+        for position, stage, count in rows:
+            counts = grouped.setdefault(position, {s: 0 for s in STAGES})
+            if stage in counts:
+                counts[stage] = count
+        results = [
+            {
+                "position": position,
+                "total": sum(grouped[position].values()),
+                "counts": grouped[position],
+            }
+            for position in sorted(grouped)
+        ]
+        print(json.dumps(results, ensure_ascii=False))
+        return 0
+
+    position = args.position.strip()
+
+    if not position:
+        emit_error({"position": "required"})
+        return 2
+
+    result = summary_for_position(conn, position)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
@@ -348,7 +375,15 @@ def build_parser():
     set_name_parser.set_defaults(handler=cmd_set_name)
 
     summary_parser = subparsers.add_parser("summary", help="按岗位汇总各阶段人数")
-    summary_parser.add_argument("--position", required=True)
+    # 两种模式互斥且必须恰好提供其一：argparse 对同时提供或都未提供的情况
+    # 输出用法说明到 stderr 并以退出码 2 结束，stdout 为空。
+    summary_group = summary_parser.add_mutually_exclusive_group(required=True)
+    summary_group.add_argument("--position", help="汇总指定岗位")
+    summary_group.add_argument(
+        "--all-positions",
+        action="store_true",
+        help="一次汇总全部至少有一名候选人的岗位",
+    )
     summary_parser.set_defaults(handler=cmd_summary)
 
     return parser

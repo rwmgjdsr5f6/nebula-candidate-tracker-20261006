@@ -19,6 +19,12 @@ python -m recruiting --db demo.sqlite3 list --position "测试工程师" --name 
 
 # 按 id 修改候选人阶段（applied/interviewing/hired/rejected 均可互转）
 python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
+
+# 按岗位汇总各阶段人数（单个对象）
+python -m recruiting --db demo.sqlite3 summary --position "测试工程师"
+
+# 一次查看全部已有岗位的招聘进度（JSON 数组）
+python -m recruiting --db demo.sqlite3 summary --all-positions
 ```
 
 字段两端空白会被去除；邮箱保留内部大小写。姓名或岗位为空返回 `required`，
@@ -57,4 +63,22 @@ position 的 `required`，合法但不存在的 id 返回 `not_found`。成功�
 9223372036854775808）返回 `not_found`。成功时只替换目标记录的姓名，保留 id、
 邮箱、岗位与阶段，不新增记录，重复设置当前姓名也按成功处理；结果 JSON 输出
 到标准输出，标准错误为空，退出码为 0。
+
+`summary` 的两种模式互斥且必须提供其一：`--position 岗位` 或
+`--all-positions`，同时指定或都未指定按命令行用法错误结束（退出码 2、
+标准输出为空、标准错误为用法说明）。
+
+`--position` 模式将岗位去除两端空白后精确匹配（区分大小写、保留内部空白），
+标准输出为单个对象 `{"position", "total", "counts"}`；显式传入空字符串或
+纯空白时向标准错误输出 `{"errors": {"position": "required"}}`，退出码为 2、
+标准输出为空。即使该岗位没有任何候选人也成功返回，`total` 为 0。
+
+`--all-positions` 模式在标准输出返回单行 JSON 数组，只包含当前至少有一名
+候选人的岗位，每个不同岗位名称只出现一次，并按名称的 Unicode 码点升序
+排列；大小写或内部空白不同的岗位分别统计。每个元素沿用单岗位模式的
+`position`、`total`、`counts` 结构，`counts` 始终包含
+`applied`、`interviewing`、`hired`、`rejected` 四项整数，没有候选人的阶段
+输出 0，`total` 等于四项之和；空数据库返回 `[]`。两种模式都只读取数据，
+不修改候选人；岗位或阶段更正后查询即反映当前值，已无候选人的旧岗位不会
+出现在全岗位结果中。成功退出码为 0、标准错误为空。
 
