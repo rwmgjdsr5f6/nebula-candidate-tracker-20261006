@@ -17,6 +17,17 @@ CREATE TABLE IF NOT EXISTS candidates (
 )
 """
 
+# 阶段变更历史：每次成功改成不同阶段追加一行，按 id 升序即发生顺序。
+# 已有数据库首次打开时自动建表，既有候选人历史自然为空。
+HISTORY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS stage_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id INTEGER NOT NULL,
+    from_stage TEXT NOT NULL,
+    to_stage TEXT NOT NULL
+)
+"""
+
 FIELDS = ("id", "name", "email", "position", "stage")
 
 # SQLite 有符号整数上限；超过此值的合法 id 不可能有对应记录。
@@ -43,6 +54,7 @@ def connect(db_path):
     """打开（必要时创建）数据库并确保表结构存在。"""
     conn = sqlite3.connect(db_path)
     conn.execute(SCHEMA)
+    conn.execute(HISTORY_SCHEMA)
     conn.commit()
     return conn
 
@@ -225,13 +237,89 @@ def validate_stage(stage):
 
 
 def cmd_set_stage(conn, args):
-    return update_candidate_field(
-        conn,
-        args.id.strip(),
-        "stage",
-        args.stage.strip(),
-        validate_stage,
-    )
+    """按 id 修改阶段；实际改成不同阶段时把变更前后值追加到历史。
+
+    校验合并、先校验后查找及失败时不改动任何数据的规则与其他 set-*
+    命令一致。重复设置当前阶段仍成功，但不更新记录也不增加历史。
+    """
+    errors = {}
+    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
+    if id_error is not None:
+        errors["id"] = id_error
+    stage = args.stage.strip()
+    stage_error = validate_stage(stage)
+    if stage_error is not None:
+        errors["stage"] = stage_error
+    if errors:
+        emit_error(errors)
+        return 2
+
+    if candidate_id_int > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"id": "not_found"})
+        return 2
+    row = conn.execute(
+        "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
+        (candidate_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"id": "not_found"})
+        return 2
+
+    record = dict(zip(FIELDS, row))
+    if record["stage"] != stage:
+        conn.execute(
+            "UPDATE candidates SET stage = ? WHERE id = ?",
+            (stage, candidate_id_int),
+        )
+        conn.execute(
+            "INSERT INTO stage_history (candidate_id, from_stage, to_stage)"
+            " VALUES (?, ?, ?)",
+            (candidate_id_int, record["stage"], stage),
+        )
+        conn.commit()
+        record["stage"] = stage
+
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
+def cmd_stage_history(conn, args):
+    """按 id 查看阶段变更历史，只读查询，不改动任何记录。
+
+    id 规则与 get 一致；成功时输出按发生顺序排列的
+    {"from_stage", "to_stage"} 数组，从未变更过的候选人为空数组。
+    """
+    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
+    if id_error is not None:
+        emit_error({"id": id_error})
+        return 2
+
+    if candidate_id_int > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"id": "not_found"})
+        return 2
+    row = conn.execute(
+        "SELECT 1 FROM candidates WHERE id = ?",
+        (candidate_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"id": "not_found"})
+        return 2
+
+    rows = conn.execute(
+        "SELECT from_stage, to_stage FROM stage_history"
+        " WHERE candidate_id = ? ORDER BY id ASC",
+        (candidate_id_int,),
+    ).fetchall()
+    history = [
+        {"from_stage": from_stage, "to_stage": to_stage}
+        for from_stage, to_stage in rows
+    ]
+    print(json.dumps(history, ensure_ascii=False))
+    return 0
 
 
 def validate_email(email):
@@ -358,6 +446,12 @@ def build_parser():
     set_stage_parser.add_argument("--id", required=True)
     set_stage_parser.add_argument("--stage", required=True)
     set_stage_parser.set_defaults(handler=cmd_set_stage)
+
+    stage_history_parser = subparsers.add_parser(
+        "stage-history", help="按 id 查看候选人阶段变更历史"
+    )
+    stage_history_parser.add_argument("--id", required=True)
+    stage_history_parser.set_defaults(handler=cmd_stage_history)
 
     set_email_parser = subparsers.add_parser("set-email", help="按 id 更正候选人邮箱")
     set_email_parser.add_argument("--id", required=True)
