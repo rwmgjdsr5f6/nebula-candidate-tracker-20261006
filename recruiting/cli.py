@@ -152,6 +152,16 @@ def cmd_list(conn, args):
     if stage is not None:
         clauses.append("stage = ?")
         params.append(stage)
+    if args.without_feedback:
+        # 按 candidate_id 关联判断该候选人是否没有任何评价：同名或同邮箱
+        # 的不同候选人分别判断，不能比较评价 id 与候选人 id。评价全部
+        # 删除后子查询无命中，候选人自然重新出现；阶段不参与判断。
+        clauses.append(
+            "NOT EXISTS ("
+            "SELECT 1 FROM feedback"
+            " WHERE feedback.candidate_id = candidates.id"
+            ")"
+        )
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     # 全岗位模式同样按 id 全局升序，不按岗位分组。
@@ -671,6 +681,14 @@ def build_parser():
     list_parser.add_argument("--name")
     list_parser.add_argument("--stage")
     list_parser.add_argument("--email")
+    # 开关不接收值：argparse 对附带值（如 --without-feedback=x）的写法
+    # 输出用法说明到 stderr 并以退出码 2 结束，stdout 为空；省略时
+    # args.without_feedback 为 False，查询结果与旧行为一致。
+    list_parser.add_argument(
+        "--without-feedback",
+        action="store_true",
+        help="只返回当前没有任何评价归属到其 id 的候选人",
+    )
     list_parser.set_defaults(handler=cmd_list)
 
     get_parser = subparsers.add_parser("get", help="按 id 查看单个候选人")
