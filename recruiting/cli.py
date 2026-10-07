@@ -283,13 +283,8 @@ def cmd_set_name(conn, args):
     )
 
 
-def cmd_summary(conn, args):
-    position = args.position.strip()
-
-    if not position:
-        emit_error({"position": "required"})
-        return 2
-
+def build_position_summary(conn, position):
+    """汇总单个岗位各阶段人数，岗位名原样作为结果中的 position。"""
     rows = conn.execute(
         "SELECT stage, COUNT(*) FROM candidates WHERE position = ? GROUP BY stage",
         (position,),
@@ -299,8 +294,28 @@ def cmd_summary(conn, args):
         if stage in counts:
             counts[stage] = count
     total = sum(counts.values())
+    return {"position": position, "total": total, "counts": counts}
 
-    result = {"position": position, "total": total, "counts": counts}
+
+def cmd_summary(conn, args):
+    if args.all_positions:
+        # 只汇总当前至少有一名候选人的岗位，每个岗位出现一次；
+        # 默认 BINARY 排序按 UTF-8 字节升序，即 Unicode 码点升序，
+        # 大小写或内部空白不同的岗位各自成行。
+        rows = conn.execute(
+            "SELECT position FROM candidates GROUP BY position ORDER BY position"
+        ).fetchall()
+        results = [build_position_summary(conn, row[0]) for row in rows]
+        print(json.dumps(results, ensure_ascii=False))
+        return 0
+
+    position = args.position.strip()
+
+    if not position:
+        emit_error({"position": "required"})
+        return 2
+
+    result = build_position_summary(conn, position)
     print(json.dumps(result, ensure_ascii=False))
     return 0
 
@@ -348,7 +363,15 @@ def build_parser():
     set_name_parser.set_defaults(handler=cmd_set_name)
 
     summary_parser = subparsers.add_parser("summary", help="按岗位汇总各阶段人数")
-    summary_parser.add_argument("--position", required=True)
+    # --all-positions 与 --position 互斥且必选其一：同时指定或都不指定均由
+    # argparse 输出用法说明到 stderr、退出码 2，stdout 为空。
+    summary_group = summary_parser.add_mutually_exclusive_group(required=True)
+    summary_group.add_argument("--position", help="按单个岗位汇总")
+    summary_group.add_argument(
+        "--all-positions",
+        action="store_true",
+        help="汇总全部已有岗位的招聘进度",
+    )
     summary_parser.set_defaults(handler=cmd_summary)
 
     return parser
