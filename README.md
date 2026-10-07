@@ -23,6 +23,12 @@ python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
 # 按 id 查看候选人阶段变更历史（JSON 数组，按发生顺序）
 python -m recruiting --db demo.sqlite3 stage-history --id 1
 
+# 为已登记候选人追加一条合成评价
+python -m recruiting --db demo.sqlite3 add-feedback --id 1 --text "表达清楚"
+
+# 按 id 查看候选人的全部合成评价（JSON 数组，按评价 id 升序）
+python -m recruiting --db demo.sqlite3 list-feedback --id 1
+
 # 按岗位汇总各阶段人数（单个对象）
 python -m recruiting --db demo.sqlite3 summary --position "测试工程师"
 
@@ -66,6 +72,26 @@ python -m recruiting --db demo.sqlite3 summary --all-positions
 9223372036854775808）返回 `{"errors": {"id": "not_found"}}`：错误仅向标准
 错误输出单行 JSON，标准输出为空，退出码为 2；缺少 `--id` 时标准错误为用法
 说明，标准输出为空，退出码为 2。
+
+`add-feedback` 接收必填的 `--id` 与 `--text`：评价文本去除两端空白，内部
+空白、换行、中文和大小写原样保留，空文本或纯空白返回 `text` 的 `required`；
+id 规则与 `set-stage` 相同（去除两端空白，仅接受 ASCII 数字组成的正整数，
+允许前导零）。参数错误先合并为同一个 `errors` 对象，存在错误时直接返回，不
+查询候选人；非法 id 与空文本同时出现时在一个 `errors` 对象中报告
+`{"id": "invalid", "text": "required"}` 两项。参数合法但候选人不存在（含
+9223372036854775808）时只返回 `id` 的 `not_found`，不保存评价或改动候选人。
+成功时标准输出为单行 JSON 对象，仅含评价的正整数 `id`、整数 `candidate_id`
+和字符串 `text`，标准错误为空，退出码为 0；重复提交相同文本也新增独立评价，
+评价 id 唯一且随追加递增，追加评价不改变候选人的阶段或统计。
+
+`list-feedback` 的 `--id` 必填且规则与 `stage-history` 相同。成功时标准
+输出为单行 JSON 数组，每项结构与追加结果一致（仅含 `id`、`candidate_id`、
+`text`），只包含目标候选人的评价，按评价 id 升序排列；已存在但没有评价的
+候选人返回 `[]`。评价保存在同一个数据库中，重启后内容与顺序一致；更正姓名、
+邮箱、岗位或阶段后仍归属原候选人 id。已有数据库无需手工初始化，历史候选人的
+初始评价为空，查询不改动任何记录、阶段或统计。非法 id 与不存在 id 的错误
+格式同 `stage-history`（仅向标准错误输出单行 JSON、标准输出为空、退出码 2）；
+缺少 `--id` 时标准错误为用法说明，标准输出为空，退出码为 2。
 
 `set-position` 的岗位沿用登记规则：去除两端空白后为空返回 `required`，
 内部空白与大小写原样保存；id 规则与 `set-stage` 相同。参数错误合并为一个

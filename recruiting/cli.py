@@ -20,6 +20,11 @@ CREATE TABLE IF NOT EXISTS stage_history (
     candidate_id INTEGER NOT NULL,
     from_stage TEXT NOT NULL,
     to_stage TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    candidate_id INTEGER NOT NULL,
+    text TEXT NOT NULL
 )
 """
 
@@ -299,6 +304,70 @@ def cmd_stage_history(conn, args):
     return 0
 
 
+def cmd_add_feedback(conn, args):
+    """为已登记候选人追加一条合成评价。
+
+    先合并完成 id 与文本的全部校验，再查找候选人；任一步失败都只向
+    标准错误输出单行 errors JSON、返回 2，且不写入评价。重复提交相同
+    文本也插入独立记录，评价 id 由 AUTOINCREMENT 保证唯一且递增。
+    """
+    errors = {}
+    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
+    if id_error is not None:
+        errors["id"] = id_error
+    text = args.text.strip()
+    if not text:
+        errors["text"] = "required"
+    if errors:
+        emit_error(errors)
+        return 2
+
+    if candidate_id_int > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"id": "not_found"})
+        return 2
+    exists = conn.execute(
+        "SELECT 1 FROM candidates WHERE id = ?",
+        (candidate_id_int,),
+    ).fetchone()
+    if exists is None:
+        emit_error({"id": "not_found"})
+        return 2
+
+    cursor = conn.execute(
+        "INSERT INTO feedback (candidate_id, text) VALUES (?, ?)",
+        (candidate_id_int, text),
+    )
+    conn.commit()
+    record = {
+        "id": cursor.lastrowid,
+        "candidate_id": candidate_id_int,
+        "text": text,
+    }
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
+def cmd_list_feedback(conn, args):
+    """按 id 查看候选人的全部合成评价，只读查询，不改动任何记录。"""
+    candidate_id_int = resolve_candidate_id(conn, args.id)
+    if candidate_id_int is None:
+        return 2
+
+    rows = conn.execute(
+        "SELECT id, candidate_id, text FROM feedback"
+        " WHERE candidate_id = ? ORDER BY id ASC",
+        (candidate_id_int,),
+    ).fetchall()
+    records = [
+        {"id": feedback_id, "candidate_id": feedback_candidate_id, "text": text}
+        for feedback_id, feedback_candidate_id, text in rows
+    ]
+    print(json.dumps(records, ensure_ascii=False))
+    return 0
+
+
 def validate_email(email):
     """邮箱沿用登记时的校验规则（含空值）：不合规返回 invalid。"""
     return "invalid" if email_is_invalid(email) else None
@@ -429,6 +498,19 @@ def build_parser():
     )
     stage_history_parser.add_argument("--id", required=True)
     stage_history_parser.set_defaults(handler=cmd_stage_history)
+
+    add_feedback_parser = subparsers.add_parser(
+        "add-feedback", help="按 id 为候选人追加合成评价"
+    )
+    add_feedback_parser.add_argument("--id", required=True)
+    add_feedback_parser.add_argument("--text", required=True)
+    add_feedback_parser.set_defaults(handler=cmd_add_feedback)
+
+    list_feedback_parser = subparsers.add_parser(
+        "list-feedback", help="按 id 查看候选人的合成评价"
+    )
+    list_feedback_parser.add_argument("--id", required=True)
+    list_feedback_parser.set_defaults(handler=cmd_list_feedback)
 
     set_email_parser = subparsers.add_parser("set-email", help="按 id 更正候选人邮箱")
     set_email_parser.add_argument("--id", required=True)
