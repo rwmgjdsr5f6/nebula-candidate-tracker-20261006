@@ -23,6 +23,10 @@ python -m recruiting --db demo.sqlite3 list --all-positions
 # 全岗位模式同样支持 --name、--stage、--email 联合筛选
 python -m recruiting --db demo.sqlite3 list --all-positions --name "林晓" --stage applied
 
+# 只列出当前没有任何评价的候选人（两种范围模式均可，可与其他筛选组合）
+python -m recruiting --db demo.sqlite3 list --position "测试工程师" --without-feedback
+python -m recruiting --db demo.sqlite3 list --all-positions --without-feedback
+
 # 按 id 修改候选人阶段（applied/interviewing/hired/rejected 均可互转）
 python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
 
@@ -72,6 +76,14 @@ python -m recruiting --db demo.sqlite3 summary --all-positions
 不合规返回 `email` 的 `invalid`，多个参数错误合并为同一个 `errors` 对象：
 字段错误只向标准错误输出单行紧凑 JSON，标准输出为空，退出码为 2。结果均按
 id 升序，查询不改动任何记录。
+
+两种范围模式还都允许追加不接收值的开关 `--without-feedback`：省略时结果与
+以往完全一致；提供时只返回当前没有任何评价归属到其 `id` 的候选人。评价按
+`candidate_id` 关联，同名或同邮箱的不同候选人分别判断，不按评价编号与候选人
+编号是否相同判断；候选人所处阶段不影响判断，评价已全部删除（含删除最后一条）
+的人也算没有评价，追加首条评价后即退出结果。开关可与 `--name`、`--email`、
+`--stage` 组合，所有条件同时成立才返回；给开关附带值按命令行用法错误结束
+（退出码 2、标准输出为空、标准错误为用法说明）。
 
 `set-stage` 的阶段去除两端空白后按小写精确匹配，须为
 `applied`、`interviewing`、`hired`、`rejected` 之一：为空返回

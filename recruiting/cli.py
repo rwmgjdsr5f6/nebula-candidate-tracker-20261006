@@ -152,6 +152,15 @@ def cmd_list(conn, args):
     if stage is not None:
         clauses.append("stage = ?")
         params.append(stage)
+    if args.without_feedback:
+        # 评价只按 candidate_id 归属判断，与评价编号、候选人编号是否相同
+        # 无关；评价全部删除后子查询无命中，候选人重新算作没有评价。阶段
+        # 不参与判断，同名或同邮箱的不同候选人各自独立判定。
+        clauses.append(
+            "NOT EXISTS ("
+            "SELECT 1 FROM feedback WHERE feedback.candidate_id = candidates.id"
+            ")"
+        )
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     # 全岗位模式同样按 id 全局升序，不按岗位分组。
@@ -671,6 +680,11 @@ def build_parser():
     list_parser.add_argument("--name")
     list_parser.add_argument("--stage")
     list_parser.add_argument("--email")
+    list_parser.add_argument(
+        "--without-feedback",
+        action="store_true",
+        help="只列出当前没有任何评价归属到其 id 的候选人",
+    )
     list_parser.set_defaults(handler=cmd_list)
 
     get_parser = subparsers.add_parser("get", help="按 id 查看单个候选人")
