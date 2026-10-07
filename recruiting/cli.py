@@ -368,14 +368,39 @@ def cmd_list_feedback(conn, args):
     return 0
 
 
+def find_feedback(conn, feedback_id_int):
+    """set-feedback 与 delete-feedback 共用的只读定位流程。
+
+    入参为已通过 validate_candidate_id 校验的编号整数；SQLite 有符号整数
+    上限判定与评价存在性查询在此统一维护，同一规则只需一处。超上限或评价
+    不存在时都只向标准错误输出单行 feedback_id 的 not_found JSON 并返回
+    None，由调用命令以退出码 2 返回；成功时返回
+    (id, candidate_id, text) 行。全程只读取数据，不改动任何记录。
+    """
+    if feedback_id_int > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的编号必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"feedback_id": "not_found"})
+        return None
+
+    row = conn.execute(
+        "SELECT id, candidate_id, text FROM feedback WHERE id = ?",
+        (feedback_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"feedback_id": "not_found"})
+        return None
+    return row
+
+
 def cmd_set_feedback(conn, args):
     """按评价 id 更正一条合成评价的文字。
 
-    先合并完成 feedback_id 与文本的全部参数校验，再查找评价；任一环节
-    失败都只向标准错误输出单行 errors JSON、返回 2，不改动任何记录。
-    成功时只替换目标评价的 text，保留 id 与 candidate_id，不新增评价；
-    重复更正为当前文字也按成功处理，不改变候选人资料、阶段历史或岗位
-    统计。
+    先合并完成 feedback_id 与文本的全部参数校验，再通过 find_feedback
+    查找评价；任一环节失败都只向标准错误输出单行 errors JSON、返回 2，
+    不改动任何记录。成功时只替换目标评价的 text，保留 id 与
+    candidate_id，不新增评价；重复更正为当前文字也按成功处理，不改变
+    候选人资料、阶段历史或岗位统计。
     """
     errors = {}
     feedback_id_error, feedback_id_int = validate_candidate_id(
@@ -390,23 +415,13 @@ def cmd_set_feedback(conn, args):
         emit_error(errors)
         return 2
 
-    if feedback_id_int > SQLITE_INT64_MAX:
-        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
-        # 避免绑定参数时抛出 OverflowError。
-        emit_error({"feedback_id": "not_found"})
-        return 2
-
-    row = conn.execute(
-        "SELECT id, candidate_id, text FROM feedback WHERE id = ?",
-        (feedback_id_int,),
-    ).fetchone()
+    row = find_feedback(conn, feedback_id_int)
     if row is None:
-        emit_error({"feedback_id": "not_found"})
         return 2
 
     conn.execute(
         "UPDATE feedback SET text = ? WHERE id = ?",
-        (text, feedback_id_int),
+        (text, row[0]),
     )
     conn.commit()
     record = {"id": row[0], "candidate_id": row[1], "text": text}
@@ -419,10 +434,10 @@ def cmd_delete_feedback(conn, args):
 
     feedback_id 沿用 set-feedback 的公开规则：去两端空白后只接受 ASCII
     数字组成的正整数（允许前导零），编号即使与某位候选人 id 相同也只
-    定位评价。校验失败或评价不存在时只向标准错误输出单行 errors JSON、
-    返回 2，不改动任何记录。成功时删除目标评价，输出其删除前的 id、
-    candidate_id 与 text（文本保持保存时的内容，换行由 JSON 转义），
-    不删除候选人，也不改变阶段历史或岗位统计。
+    定位评价。校验失败或 find_feedback 判定评价不存在时只向标准错误
+    输出单行 errors JSON、返回 2，不改动任何记录。成功时删除目标评价，
+    输出其删除前的 id、candidate_id 与 text（文本保持保存时的内容，
+    换行由 JSON 转义），不删除候选人，也不改变阶段历史或岗位统计。
     """
     feedback_id_error, feedback_id_int = validate_candidate_id(
         args.feedback_id.strip()
@@ -431,21 +446,11 @@ def cmd_delete_feedback(conn, args):
         emit_error({"feedback_id": feedback_id_error})
         return 2
 
-    if feedback_id_int > SQLITE_INT64_MAX:
-        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
-        # 避免绑定参数时抛出 OverflowError。
-        emit_error({"feedback_id": "not_found"})
-        return 2
-
-    row = conn.execute(
-        "SELECT id, candidate_id, text FROM feedback WHERE id = ?",
-        (feedback_id_int,),
-    ).fetchone()
+    row = find_feedback(conn, feedback_id_int)
     if row is None:
-        emit_error({"feedback_id": "not_found"})
         return 2
 
-    conn.execute("DELETE FROM feedback WHERE id = ?", (feedback_id_int,))
+    conn.execute("DELETE FROM feedback WHERE id = ?", (row[0],))
     conn.commit()
     record = {"id": row[0], "candidate_id": row[1], "text": row[2]}
     print(json.dumps(record, ensure_ascii=False))
