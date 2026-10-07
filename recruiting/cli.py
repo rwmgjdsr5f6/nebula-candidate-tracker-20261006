@@ -328,70 +328,6 @@ def validate_feedback_text(text):
     return None, text
 
 
-def cmd_add_feedback(conn, args):
-    """为已登记候选人追加一条合成评价。
-
-    先合并完成 id 与文本的全部校验，再查找候选人；任一步失败都只向
-    标准错误输出单行 errors JSON、返回 2，且不写入评价。重复提交相同
-    文本也插入独立记录，评价 id 由 AUTOINCREMENT 保证唯一且递增。
-    """
-    errors = {}
-    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
-    if id_error is not None:
-        errors["id"] = id_error
-    text_error, text = validate_feedback_text(args.text)
-    if text_error is not None:
-        errors["text"] = text_error
-    if errors:
-        emit_error(errors)
-        return 2
-
-    if candidate_id_int > SQLITE_INT64_MAX:
-        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
-        # 避免绑定参数时抛出 OverflowError。
-        emit_error({"id": "not_found"})
-        return 2
-    exists = conn.execute(
-        "SELECT 1 FROM candidates WHERE id = ?",
-        (candidate_id_int,),
-    ).fetchone()
-    if exists is None:
-        emit_error({"id": "not_found"})
-        return 2
-
-    cursor = conn.execute(
-        "INSERT INTO feedback (candidate_id, text) VALUES (?, ?)",
-        (candidate_id_int, text),
-    )
-    conn.commit()
-    record = {
-        "id": cursor.lastrowid,
-        "candidate_id": candidate_id_int,
-        "text": text,
-    }
-    print(json.dumps(record, ensure_ascii=False))
-    return 0
-
-
-def cmd_list_feedback(conn, args):
-    """按 id 查看候选人的全部合成评价，只读查询，不改动任何记录。"""
-    candidate_id_int = resolve_candidate_id(conn, args.id)
-    if candidate_id_int is None:
-        return 2
-
-    rows = conn.execute(
-        "SELECT id, candidate_id, text FROM feedback"
-        " WHERE candidate_id = ? ORDER BY id ASC",
-        (candidate_id_int,),
-    ).fetchall()
-    records = [
-        {"id": feedback_id, "candidate_id": feedback_candidate_id, "text": text}
-        for feedback_id, feedback_candidate_id, text in rows
-    ]
-    print(json.dumps(records, ensure_ascii=False))
-    return 0
-
-
 def find_feedback(conn, feedback_id_int):
     """set-feedback 与 delete-feedback 共用的评价定位流程。
 
@@ -416,40 +352,127 @@ def find_feedback(conn, feedback_id_int):
     return row
 
 
-def cmd_set_feedback(conn, args):
-    """按评价 id 更正一条合成评价的文字。
+def validate_feedback_inputs(raw_id, raw_text, id_field):
+    """add-feedback 与 set-feedback 共用的入参校验。
 
-    先合并完成 feedback_id 与文本的全部参数校验，再查找评价；任一环节
-    失败都只向标准错误输出单行 errors JSON、返回 2，不改动任何记录。
-    成功时只替换目标评价的 text，保留 id 与 candidate_id，不新增评价；
-    重复更正为当前文字也按成功处理，不改变候选人资料、阶段历史或岗位
-    统计。
+    编号与文本都先去除两端空白：编号只接受 ASCII 数字组成的正整数（允许
+    前导零），空值、全零、负数、带正号、小数或非 ASCII 数字按 id_field
+    （追加为 "id"、更正为 "feedback_id"，两者不能混用）记 "invalid"；
+    文本去空白后为空记 text 的 "required"，内部空白、换行、中文与大小写
+    原样保留。两项错误合并到同一个 errors 对象。返回 (errors, 编号整数,
+    去空白文本)，编号非法时整数为 None（此时文本仍照常校验并返回）。
     """
     errors = {}
-    feedback_id_error, feedback_id_int = validate_candidate_id(
-        args.feedback_id.strip()
-    )
-    if feedback_id_error is not None:
-        errors["feedback_id"] = feedback_id_error
-    text_error, text = validate_feedback_text(args.text)
+    id_error, record_id_int = validate_candidate_id(raw_id.strip())
+    if id_error is not None:
+        errors[id_field] = id_error
+    text_error, text = validate_feedback_text(raw_text)
     if text_error is not None:
         errors["text"] = text_error
+    return errors, record_id_int, text
+
+
+def mutate_feedback(conn, id_field, raw_id, raw_text, *, mode):
+    """add-feedback 与 set-feedback 共用的校验、定位与写入流程。
+
+    mode 为 "add" 时编号定位候选人（id_field 传 "id"），通过后插入一条
+    独立评价；mode 为 "set" 时编号定位评价本身（id_field 传
+    "feedback_id"），通过后只替换该评价的 text，保留 id 与
+    candidate_id。先合并完成编号与文本的全部校验，再查找记录；任一步
+    失败都只向标准错误输出单行 errors JSON、返回 2，且不改动任何记录。
+    成功时提交并输出只含 id、candidate_id、text 的单行 JSON，返回 0。
+    """
+    errors, record_id_int, text = validate_feedback_inputs(
+        raw_id, raw_text, id_field
+    )
     if errors:
         emit_error(errors)
         return 2
 
-    row = find_feedback(conn, feedback_id_int)
-    if row is None:
-        return 2
+    if mode == "add":
+        if record_id_int > SQLITE_INT64_MAX:
+            # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
+            # 避免绑定参数时抛出 OverflowError。
+            emit_error({id_field: "not_found"})
+            return 2
+        exists = conn.execute(
+            "SELECT 1 FROM candidates WHERE id = ?",
+            (record_id_int,),
+        ).fetchone()
+        if exists is None:
+            emit_error({id_field: "not_found"})
+            return 2
 
-    conn.execute(
-        "UPDATE feedback SET text = ? WHERE id = ?",
-        (text, feedback_id_int),
-    )
-    conn.commit()
-    record = {"id": row[0], "candidate_id": row[1], "text": text}
+        cursor = conn.execute(
+            "INSERT INTO feedback (candidate_id, text) VALUES (?, ?)",
+            (record_id_int, text),
+        )
+        conn.commit()
+        record = {
+            "id": cursor.lastrowid,
+            "candidate_id": record_id_int,
+            "text": text,
+        }
+    else:
+        # find_feedback 与 delete-feedback 共用，编号字段固定为
+        # feedback_id，与 set-feedback 的 id_field 一致。
+        row = find_feedback(conn, record_id_int)
+        if row is None:
+            return 2
+
+        conn.execute(
+            "UPDATE feedback SET text = ? WHERE id = ?",
+            (text, record_id_int),
+        )
+        conn.commit()
+        record = {"id": row[0], "candidate_id": row[1], "text": text}
+
     print(json.dumps(record, ensure_ascii=False))
     return 0
+
+
+def cmd_add_feedback(conn, args):
+    """为已登记候选人追加一条合成评价。
+
+    编号与文本的校验、定位、错误输出与成功响应由 mutate_feedback 与
+    set-feedback 共用：编号错误归入 id，与更正入口的 feedback_id 不
+    混用。重复提交相同文本也插入独立记录，评价 id 由 AUTOINCREMENT
+    保证唯一且递增。
+    """
+    return mutate_feedback(conn, "id", args.id, args.text, mode="add")
+
+
+def cmd_list_feedback(conn, args):
+    """按 id 查看候选人的全部合成评价，只读查询，不改动任何记录。"""
+    candidate_id_int = resolve_candidate_id(conn, args.id)
+    if candidate_id_int is None:
+        return 2
+
+    rows = conn.execute(
+        "SELECT id, candidate_id, text FROM feedback"
+        " WHERE candidate_id = ? ORDER BY id ASC",
+        (candidate_id_int,),
+    ).fetchall()
+    records = [
+        {"id": feedback_id, "candidate_id": feedback_candidate_id, "text": text}
+        for feedback_id, feedback_candidate_id, text in rows
+    ]
+    print(json.dumps(records, ensure_ascii=False))
+    return 0
+
+
+def cmd_set_feedback(conn, args):
+    """按评价 id 更正一条合成评价的文字。
+
+    编号与文本的校验、定位、错误输出与成功响应由 mutate_feedback 与
+    add-feedback 共用，但写入语义保留在本入口：编号错误归入
+    feedback_id（与追加入口的 id 不混用），成功时只替换目标评价的
+    text，保留 id 与 candidate_id，不新增评价；重复更正为当前文字也
+    按成功处理，不改变候选人资料、阶段历史或岗位统计。
+    """
+    return mutate_feedback(
+        conn, "feedback_id", args.feedback_id, args.text, mode="set"
+    )
 
 
 def cmd_delete_feedback(conn, args):
