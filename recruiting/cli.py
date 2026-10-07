@@ -103,14 +103,18 @@ def cmd_add(conn, args):
 
 
 def cmd_list(conn, args):
-    position = args.position.strip()
     stage = args.stage.strip() if args.stage is not None else None
     email = args.email.strip() if args.email is not None else None
     name = args.name.strip() if args.name is not None else None
 
     errors = {}
-    if not position:
-        errors["position"] = "required"
+    # 全岗位模式不接收岗位条件，也不做岗位校验；岗位模式下去空白后
+    # 不能为空。
+    position = None
+    if not args.all_positions:
+        position = args.position.strip()
+        if not position:
+            errors["position"] = "required"
     if name is not None and not name:
         errors["name"] = "required"
     if email is not None and email_is_invalid(email):
@@ -124,19 +128,26 @@ def cmd_list(conn, args):
         emit_error(errors, compact=True)
         return 2
 
-    sql = "SELECT id, name, email, position, stage FROM candidates WHERE position = ?"
-    params = [position]
+    sql = "SELECT id, name, email, position, stage FROM candidates"
+    clauses = []
+    params = []
+    if position is not None:
+        clauses.append("position = ?")
+        params.append(position)
     if name is not None:
         # 默认 BINARY 比较按 UTF-8 字节完整匹配：区分英文字母大小写、
         # 保留内部空白，不作子串或通配符匹配；重名记录全部返回。
-        sql += " AND name = ?"
+        clauses.append("name = ?")
         params.append(name)
     if email is not None:
-        sql += " AND email = ?"
+        clauses.append("email = ?")
         params.append(email)
     if stage is not None:
-        sql += " AND stage = ?"
+        clauses.append("stage = ?")
         params.append(stage)
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    # 全岗位模式同样按 id 全局升序，不按岗位分组。
     sql += " ORDER BY id ASC"
     rows = conn.execute(sql, params).fetchall()
     records = [dict(zip(FIELDS, row)) for row in rows]
@@ -598,7 +609,16 @@ def build_parser():
     add_parser.set_defaults(handler=cmd_add)
 
     list_parser = subparsers.add_parser("list", help="按岗位查询候选人")
-    list_parser.add_argument("--position", required=True)
+    # 两种范围互斥且必须恰好提供其一：argparse 对同时提供（含空岗位值
+    # 与开关并用）或都未提供的情况输出用法说明到 stderr 并以退出码 2
+    # 结束，stdout 为空。
+    list_group = list_parser.add_mutually_exclusive_group(required=True)
+    list_group.add_argument("--position", help="只查询指定岗位")
+    list_group.add_argument(
+        "--all-positions",
+        action="store_true",
+        help="跨岗位查询全部候选人，按 id 全局升序",
+    )
     list_parser.add_argument("--name")
     list_parser.add_argument("--stage")
     list_parser.add_argument("--email")

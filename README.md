@@ -17,6 +17,12 @@ python -m recruiting --db demo.sqlite3 list --position "测试工程师"
 # 在岗位之内再按合成姓名精确查找（去除两端空白，保留内部空白、区分大小写）
 python -m recruiting --db demo.sqlite3 list --position "测试工程师" --name "林晓"
 
+# 不知道岗位时跨岗位查询全部候选人（按 id 全局升序，不按岗位分组）
+python -m recruiting --db demo.sqlite3 list --all-positions
+
+# 全岗位模式同样支持 --name、--stage、--email 联合筛选
+python -m recruiting --db demo.sqlite3 list --all-positions --name "林晓" --stage applied
+
 # 按 id 修改候选人阶段（applied/interviewing/hired/rejected 均可互转）
 python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
 
@@ -47,14 +53,25 @@ python -m recruiting --db demo.sqlite3 summary --all-positions
 （`errors` 映射字段名到错误值），退出码为 2，且不写入记录。成功退出码为 0，
 结果 JSON 输出到标准输出。
 
-`list` 必传岗位，`--name`、`--stage`、`--email` 均可选；省略时不过滤该条件，
-提供时四个条件同时成立才算命中，同名候选人全部返回。`--name` 去除两端空白后
-与保存的姓名完整匹配（保留内部空白、区分英文字母大小写，不作子串或通配符
-匹配），显式传入空字符串或纯空白返回 `required`；岗位为空返回 `position` 的
-`required`，阶段为空返回 `stage` 的 `required`、非法或大写阶段返回
-`stage` 的 `invalid`，邮箱不合规返回 `email` 的 `invalid`，多个参数错误合并为
-同一个 `errors` 对象。结果为候选人五字段 JSON 数组、按 id 升序，没有匹配记录
-时返回 `[]`；查询不改动任何记录。
+`list` 的两种范围选项互斥且必须提供其一：`--position 岗位` 或
+`--all-positions`，同时指定（含空岗位值与开关并用）或都未指定按命令行
+用法错误结束（退出码 2、标准输出为空、标准错误为用法说明）。
+
+`--position` 模式按岗位精确查询；`--all-positions` 模式跨岗位查询，成功时
+标准输出为单行 JSON 数组，每项沿用候选人的 `id`、`name`、`email`、
+`position`、`stage` 五字段对象，按 id 全局升序排列、不按岗位分组，同名或
+同邮箱的记录分别保留；空数据库或无匹配记录均返回 `[]`，成功退出码为 0、
+标准错误为空。
+
+两种模式都允许使用可选的 `--name`、`--stage`、`--email`；省略时不过滤该
+条件，全部提供时所有条件同时成立才算命中。筛选值去除两端空白，姓名和邮箱
+完整匹配、区分大小写（姓名内部空白保留，百分号和下划线按普通字符处理），
+同名候选人全部返回。显式传入空字符串或纯空白的姓名返回 `name` 的
+`required`，岗位为空返回 `position` 的 `required`（仅岗位模式），阶段为空
+返回 `stage` 的 `required`、非法或大写阶段返回 `stage` 的 `invalid`，邮箱
+不合规返回 `email` 的 `invalid`，多个参数错误合并为同一个 `errors` 对象：
+字段错误只向标准错误输出单行紧凑 JSON，标准输出为空，退出码为 2。结果均按
+id 升序，查询不改动任何记录。
 
 `set-stage` 的阶段去除两端空白后按小写精确匹配，须为
 `applied`、`interviewing`、`hired`、`rejected` 之一：为空返回
