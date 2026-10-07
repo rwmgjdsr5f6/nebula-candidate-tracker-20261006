@@ -269,6 +269,179 @@ class FeedbackPersistenceAndCorrectionsTests(FeedbackTestCase):
         self.assert_list(self.zhou_ning["id"], [])
 
 
+class SetFeedbackTests(FeedbackTestCase):
+    def setUp(self):
+        super().setUp()
+        lin_id = self.lin_xiao["id"]
+        zhou_id = self.zhou_ning["id"]
+        # 第一人两条（编号 1、2），第二人一条（编号 3）
+        self.first = self.assert_add_success(
+            self.add_feedback(lin_id, "第一条"), lin_id, "第一条"
+        )
+        self.second = self.assert_add_success(
+            self.add_feedback(lin_id, "第二条"), lin_id, "第二条"
+        )
+        self.third = self.assert_add_success(
+            self.add_feedback(zhou_id, "周宁评价"), zhou_id, "周宁评价"
+        )
+
+    def set_feedback(self, feedback_id, text):
+        return self.run_cli(
+            "set-feedback", "--feedback-id", str(feedback_id), "--text", text
+        )
+
+    def assert_set_success(self, result, feedback_id, candidate_id, text):
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        record = json.loads(result.stdout)
+        self.assertEqual(
+            record, {"id": feedback_id, "candidate_id": candidate_id, "text": text}
+        )
+        self.assertEqual(set(record), {"id", "candidate_id", "text"})
+        return record
+
+    def test_replaces_only_text_keeping_id_and_candidate(self):
+        """成功时只替换 text，保留 id 与 candidate_id；数量与升序不变。"""
+        result = self.set_feedback(self.second["id"], " 表达清楚 ")
+        self.assert_set_success(
+            result, self.second["id"], self.second["candidate_id"], "表达清楚"
+        )
+        lin_id = self.lin_xiao["id"]
+        self.assert_list(
+            lin_id,
+            [self.first, {"id": self.second["id"], "candidate_id": lin_id,
+                          "text": "表达清楚"}],
+        )
+        # 第二人的评价与第一人编号 1 的评价保持原样
+        self.assert_list(self.zhou_ning["id"], [self.third])
+
+    def test_inner_whitespace_newlines_chinese_and_case_kept(self):
+        text = "  Line TWO 二行  \n继续  "
+        result = self.set_feedback(self.first["id"], text)
+        self.assert_set_success(
+            result, self.first["id"], self.first["candidate_id"],
+            "Line TWO 二行  \n继续",
+        )
+
+    def test_feedback_id_not_candidate_id(self):
+        """编号取自评价结果：候选人 id 2 存在但评价 id 2 属于第一人。"""
+        result = self.set_feedback(self.zhou_ning["id"], "x")
+        self.assertEqual(json.loads(result.stdout)["candidate_id"], self.lin_xiao["id"])
+
+    def test_repeat_same_text_succeeds_without_new_feedback(self):
+        """重复更正为当前文字也成功，不新增评价，顺序与归属不变。"""
+        result = self.set_feedback(self.second["id"], "第二条")
+        self.assert_set_success(
+            result, self.second["id"], self.second["candidate_id"], "第二条"
+        )
+        self.assert_list(self.lin_xiao["id"], [self.first, self.second])
+        self.assert_list(self.zhou_ning["id"], [self.third])
+
+    def test_leading_zero_and_surrounding_whitespace_id(self):
+        result = self.set_feedback(
+            "  000{}  ".format(self.third["id"]), "新文字"
+        )
+        self.assert_set_success(
+            result, self.third["id"], self.third["candidate_id"], "新文字"
+        )
+
+    def test_blank_text_is_required(self):
+        for blank in ("", "   ", "\t\n "):
+            with self.subTest(blank=repr(blank)):
+                self.assert_failure(
+                    self.set_feedback(self.second["id"], blank),
+                    {"text": "required"},
+                )
+
+    def test_invalid_feedback_id_is_reported(self):
+        for bad_id in ("abc", "0", "000", "-1", "1.5", "+1", "１２"):
+            with self.subTest(bad_id=bad_id):
+                self.assert_failure(
+                    self.set_feedback(bad_id, "x"),
+                    {"feedback_id": "invalid"},
+                )
+
+    def test_invalid_id_and_blank_text_reported_together(self):
+        """非法编号与空文本同时出现时在一个 errors 对象中报告两项。"""
+        self.assert_failure(
+            self.set_feedback("abc", " "),
+            {"feedback_id": "invalid", "text": "required"},
+        )
+
+    def test_unknown_id_with_blank_text_reports_only_text(self):
+        """先合并参数错误：不存在的编号配合空文本仅报告 text 的 required。"""
+        self.assert_failure(
+            self.set_feedback(999, " "), {"text": "required"}
+        )
+
+    def test_unknown_feedback_id_is_not_found(self):
+        self.assert_failure(
+            self.set_feedback(999, "x"), {"feedback_id": "not_found"}
+        )
+
+    def test_id_above_sqlite_int64_max_is_not_found(self):
+        self.assert_failure(
+            self.set_feedback("9223372036854775808", "x"),
+            {"feedback_id": "not_found"},
+        )
+
+    def test_int64_overflow_with_blank_text_reports_only_text(self):
+        self.assert_failure(
+            self.set_feedback("9223372036854775808", " "),
+            {"text": "required"},
+        )
+
+    def test_failure_saves_nothing(self):
+        """参数或存在性错误不改动任何评价、候选人、历史或统计。"""
+        lin_id = self.lin_xiao["id"]
+        profile_before = self.run_cli("get", "--id", str(lin_id))
+        summary_before = self.run_cli(
+            "summary", "--position", POSITION
+        )
+        self.set_feedback("abc", " ")
+        self.set_feedback(999, " ")
+        self.set_feedback(999, "x")
+        self.set_feedback("9223372036854775808", "x")
+        self.assert_list(lin_id, [self.first, self.second])
+        self.assert_list(self.zhou_ning["id"], [self.third])
+        self.assertEqual(
+            self.run_cli("get", "--id", str(lin_id)).stdout,
+            profile_before.stdout,
+        )
+        self.assertEqual(
+            self.run_cli("stage-history", "--id", str(lin_id)).stdout, "[]\n"
+        )
+        self.assertEqual(
+            self.run_cli("summary", "--position", POSITION).stdout,
+            summary_before.stdout,
+        )
+
+    def test_persists_across_reopen(self):
+        """更正保存在数据库中，重新打开同一数据库结果一致。"""
+        self.set_feedback(self.second["id"], "更正后")
+        expected = [
+            self.first,
+            {"id": self.second["id"], "candidate_id": self.lin_xiao["id"],
+             "text": "更正后"},
+        ]
+        self.assert_list(self.lin_xiao["id"], expected)
+        self.assert_list(self.lin_xiao["id"], expected)
+
+    def test_missing_options_are_usage_errors(self):
+        """缺少必填选项时标准错误为用法说明，标准输出为空，退出码为 2。"""
+        result = self.run_cli(
+            "set-feedback", "--feedback-id", str(self.second["id"])
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("usage", result.stderr)
+
+        result = self.run_cli("set-feedback", "--text", "x")
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("usage", result.stderr)
+
+
 class FeedbackExistingDatabaseTests(unittest.TestCase):
     """只有 candidates 表的旧库直接可用，历史候选人初始评价为空。"""
 

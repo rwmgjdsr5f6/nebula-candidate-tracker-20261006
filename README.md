@@ -29,6 +29,9 @@ python -m recruiting --db demo.sqlite3 add-feedback --id 1 --text "表达清楚"
 # 按 id 查看候选人的全部合成评价（JSON 数组，按评价 id 升序）
 python -m recruiting --db demo.sqlite3 list-feedback --id 1
 
+# 按评价编号更正一条评价的文字（保留评价 id 与归属的候选人 id）
+python -m recruiting --db demo.sqlite3 set-feedback --feedback-id 2 --text "表达清楚"
+
 # 按岗位汇总各阶段人数（单个对象）
 python -m recruiting --db demo.sqlite3 summary --position "测试工程师"
 
@@ -92,6 +95,24 @@ id 规则与 `set-stage` 相同（去除两端空白，仅接受 ASCII 数字组
 初始评价为空，查询不改动任何记录、阶段或统计。非法 id 与不存在 id 的错误
 格式同 `stage-history`（仅向标准错误输出单行 JSON、标准输出为空、退出码 2）；
 缺少 `--id` 时标准错误为用法说明，标准输出为空，退出码为 2。
+
+`set-feedback` 接收必填的 `--feedback-id` 与 `--text`，按评价编号（取自
+已有评价结果，不是候选人编号）更正一条评价的文字。文本规则与
+`add-feedback` 相同：去除两端空白，内部空白、换行、中文和大小写原样保留，
+空文本或纯空白返回 `text` 的 `required`；编号去除两端空白后须为 ASCII
+数字组成的正整数（允许前导零），否则返回 `feedback_id` 的 `invalid`。参数
+错误先合并为同一个 `errors` 对象再判断记录是否存在：非法编号配合空文本时
+在一个 `errors` 对象中报告
+`{"feedback_id": "invalid", "text": "required"}` 两项，不存在的编号配合
+空文本时仅报告 `text` 的 `required`。参数合法但评价不存在（含
+9223372036854775808）时返回 `feedback_id` 的 `not_found`。字段错误只向
+标准错误输出单行 errors JSON，标准输出为空，退出码为 2，且不改动任何记录。
+成功时只替换目标评价的 `text`，保留 `id` 和 `candidate_id`，标准输出为仅
+含这三个字段的单行 JSON 对象，标准错误为空，退出码为 0；不新增评价，
+`list-feedback` 显示新文字，评价数量及按评价 id 升序的顺序不变，重复更正
+为当前文字也按成功处理，不改变候选人资料、阶段历史或岗位统计。缺少
+`--feedback-id` 或 `--text` 时标准错误为用法说明，标准输出为空，退出码为
+2。
 
 `set-position` 的岗位沿用登记规则：去除两端空白后为空返回 `required`，
 内部空白与大小写原样保存；id 规则与 `set-stage` 相同。参数错误合并为一个

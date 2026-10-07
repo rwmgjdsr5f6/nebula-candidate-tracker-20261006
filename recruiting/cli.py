@@ -368,6 +368,52 @@ def cmd_list_feedback(conn, args):
     return 0
 
 
+def cmd_set_feedback(conn, args):
+    """按评价 id 更正一条合成评价的文字。
+
+    先合并完成 feedback_id 与文本的全部参数校验，再查找评价；任一环节
+    失败都只向标准错误输出单行 errors JSON、返回 2，不改动任何记录。
+    成功时只替换目标评价的 text，保留 id 与 candidate_id，不新增评价；
+    重复更正为当前文字也按成功处理，不改变候选人资料、阶段历史或岗位
+    统计。
+    """
+    errors = {}
+    feedback_id_error, feedback_id_int = validate_candidate_id(
+        args.feedback_id.strip()
+    )
+    if feedback_id_error is not None:
+        errors["feedback_id"] = feedback_id_error
+    text = args.text.strip()
+    if not text:
+        errors["text"] = "required"
+    if errors:
+        emit_error(errors)
+        return 2
+
+    if feedback_id_int > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"feedback_id": "not_found"})
+        return 2
+
+    row = conn.execute(
+        "SELECT id, candidate_id, text FROM feedback WHERE id = ?",
+        (feedback_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"feedback_id": "not_found"})
+        return 2
+
+    conn.execute(
+        "UPDATE feedback SET text = ? WHERE id = ?",
+        (text, feedback_id_int),
+    )
+    conn.commit()
+    record = {"id": row[0], "candidate_id": row[1], "text": text}
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
 def validate_email(email):
     """邮箱沿用登记时的校验规则（含空值）：不合规返回 invalid。"""
     return "invalid" if email_is_invalid(email) else None
@@ -530,6 +576,13 @@ def build_parser():
     )
     list_feedback_parser.add_argument("--id", required=True)
     list_feedback_parser.set_defaults(handler=cmd_list_feedback)
+
+    set_feedback_parser = subparsers.add_parser(
+        "set-feedback", help="按评价 id 更正一条合成评价的文字"
+    )
+    set_feedback_parser.add_argument("--feedback-id", required=True)
+    set_feedback_parser.add_argument("--text", required=True)
+    set_feedback_parser.set_defaults(handler=cmd_set_feedback)
 
     set_email_parser = subparsers.add_parser("set-email", help="按 id 更正候选人邮箱")
     set_email_parser.add_argument("--id", required=True)
