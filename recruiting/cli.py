@@ -417,42 +417,61 @@ def cmd_set_name(conn, args):
     )
 
 
-def summary_for_position(conn, position):
-    """单个岗位的各阶段人数汇总，未出现的阶段计 0。"""
-    rows = conn.execute(
-        "SELECT stage, COUNT(*) FROM candidates WHERE position = ? GROUP BY stage",
-        (position,),
-    ).fetchall()
-    counts = {stage: 0 for stage in STAGES}
-    for stage, count in rows:
+def query_stage_counts(conn, position=None):
+    """按岗位与阶段分组统计人数，返回 (position, stage, count) 行。
+
+    position 为 None 时统计全部岗位，否则只统计该岗位。默认 BINARY 分组
+    区分大小写与内部空白。只读查询，不改动任何记录。
+    """
+    sql = "SELECT position, stage, COUNT(*) FROM candidates"
+    params = []
+    if position is not None:
+        sql += " WHERE position = ?"
+        params.append(position)
+    sql += " GROUP BY position, stage"
+    return conn.execute(sql, params).fetchall()
+
+
+def group_stage_counts(rows):
+    """把 (position, stage, count) 行整理为 岗位 -> 四阶段计数。
+
+    每个出现的岗位都补齐 applied、interviewing、hired、rejected 四项，
+    未出现的阶段计 0；四种已知阶段之外的值不参与统计。
+    """
+    grouped = {}
+    for position, stage, count in rows:
+        counts = grouped.setdefault(position, {s: 0 for s in STAGES})
         if stage in counts:
             counts[stage] = count
+    return grouped
+
+
+def build_summary(position, counts):
+    """单个岗位的汇总对象：total 为四阶段计数之和。"""
     return {"position": position, "total": sum(counts.values()), "counts": counts}
+
+
+def summary_for_position(conn, position):
+    """单个岗位的各阶段人数汇总，未出现的阶段计 0。"""
+    grouped = group_stage_counts(query_stage_counts(conn, position))
+    counts = grouped.get(position, {s: 0 for s in STAGES})
+    return build_summary(position, counts)
+
+
+def summary_for_all_positions(conn):
+    """全部岗位的汇总列表，只保留至少有一名候选人的岗位。
+
+    岗位更正后旧岗位若无候选人自然不再出现；名称按 Unicode 码点升序
+    在 Python 侧排序。
+    """
+    grouped = group_stage_counts(query_stage_counts(conn))
+    return [build_summary(position, grouped[position]) for position in sorted(grouped)]
 
 
 def cmd_summary(conn, args):
     if args.all_positions:
-        # 一次汇总全部岗位：按当前岗位、阶段分组，只保留至少有一名候选人的
-        # 岗位；岗位更正后旧岗位若无候选人自然不再出现。默认 BINARY 分组
-        # 区分大小写与内部空白；名称按 Unicode 码点升序在 Python 侧排序。
-        rows = conn.execute(
-            "SELECT position, stage, COUNT(*) FROM candidates"
-            " GROUP BY position, stage"
-        ).fetchall()
-        grouped = {}
-        for position, stage, count in rows:
-            counts = grouped.setdefault(position, {s: 0 for s in STAGES})
-            if stage in counts:
-                counts[stage] = count
-        results = [
-            {
-                "position": position,
-                "total": sum(grouped[position].values()),
-                "counts": grouped[position],
-            }
-            for position in sorted(grouped)
-        ]
-        print(json.dumps(results, ensure_ascii=False))
+        # 一次汇总全部仍有候选人的岗位，输出单行 JSON 数组。
+        print(json.dumps(summary_for_all_positions(conn), ensure_ascii=False))
         return 0
 
     position = args.position.strip()
