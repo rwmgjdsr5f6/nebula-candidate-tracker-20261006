@@ -1,4 +1,5 @@
 import argparse
+import contextlib
 import json
 import re
 import sqlite3
@@ -32,6 +33,27 @@ FIELDS = ("id", "name", "email", "position", "stage")
 
 # SQLite 有符号整数上限；超过此值的合法 id 不可能有对应记录。
 SQLITE_INT64_MAX = 9223372036854775807
+
+
+@contextlib.contextmanager
+def unrestricted_int_digits():
+    """临时解除 Python 3.11+ 对整数字符串转换的默认位数限制（PEP 682）。
+
+    仅包裹命令内部对编号字符串的转换：进入时放开限制（0 表示不限），
+    退出时恢复进程原值，不要求使用者调整运行设置；3.11 以前的 Python
+    没有 sys.set_int_max_str_digits，直接透传。
+    """
+    set_limit = getattr(sys, "set_int_max_str_digits", None)
+    get_limit = getattr(sys, "get_int_max_str_digits", None)
+    if set_limit is None:
+        yield
+        return
+    previous = get_limit()
+    set_limit(0)
+    try:
+        yield
+    finally:
+        set_limit(previous)
 
 
 def email_is_invalid(email):
@@ -159,11 +181,18 @@ def validate_candidate_id(candidate_id):
     """id 去空白后的规则：须为正整数（允许前导零）。
 
     合法返回 (None, 对应整数)；空值、全零、负数、带正号或含非 ASCII
-    数字等返回 ("invalid", None)。
+    数字等返回 ("invalid", None)。前导零不影响数值，编号即使长达数千
+    位也只按数值判定分类，不因长度触发 ValueError。
     """
-    if not re.fullmatch(r"[0-9]+", candidate_id) or int(candidate_id) < 1:
+    if not re.fullmatch(r"[0-9]+", candidate_id):
         return "invalid", None
-    return None, int(candidate_id)
+    # Python 3.11+ 默认只允许转换 4300 位以内的整数字符串；编号长度本身
+    # 不改变合法/非法分类，转换期间临时放开限制，结束后恢复进程原值。
+    with unrestricted_int_digits():
+        value = int(candidate_id)
+    if value < 1:
+        return "invalid", None
+    return None, value
 
 
 def resolve_candidate_id(conn, candidate_id):
