@@ -1,26 +1,39 @@
 ================================================================================
-候选人登记与按岗位查询 —— 最小流程行为说明（静态代码核对报告）
+候选人登记与按岗位叠加条件查询 —— 最小流程行为说明（静态代码核对报告）
 ================================================================================
 
-生成日期：2026-10-06
+生成日期：2026-10-07（替代 2026-10-06 版；旧版称 list 的姓名/邮箱/阶段筛选
+         “未实现”，与当前源码不符，本版按当前源码重写）
 核对方式：仅静态阅读仓库内源码、README 与测试文件；未运行产品代码，未修改
-         任何源码、文档或数据库文件。
-追踪范围：用户从命令行输入姓名/邮箱/岗位 → 登记（add）→ 按岗位查询（list）
-         → 查询结果输出这一条路径。set-stage、面试、评价、日程、报表均不追踪。
+         任何源码、文档或数据库文件。本报告是唯一交付物。
+追踪范围：用户从命令行输入姓名/邮箱/岗位 → 登记（add）→ 按岗位查询并可叠加
+         姓名/邮箱/阶段筛选（list）→ 查询结果输出这一条路径。
+         get、set-stage、set-email、set-position、set-name、summary 均不在
+         追踪范围；它们只在“前置状态需要非 applied 阶段”时被提及（见第五节
+         注记），其行为不展开、不下结论。
 
 仓库内全部文件（find 全量列举，不含 .git）：
+  .gitignore
   README.md
+  candidate_flow_report.txt（本文件）
   recruiting/__init__.py
   recruiting/__main__.py
   recruiting/cli.py
+  test_add_registration.py
+  test_get.py
+  test_list_filter.py
+  test_list_name_filter.py
+  test_set_email.py
+  test_set_name.py
+  test_set_position.py
   test_set_stage.py
-  .gitignore
+  test_summary.py
 
 结论分级标记：
-  [代码] 可直接在源码中定位的结论
+  [代码] 可直接在源码中定位的结论（标注当前文件与行号）
   [文档] 仅见于 README 的说法（凡 [文档] 均同时给出代码核对结果）
-  [测试] 仓库内测试文件对公开命令行为的佐证（测试通过子进程调用 CLI）
-  [未实现] 仓库中找不到入口或实现的环节，并写明缺少什么证据
+  [测试] 仓库内测试文件对公开命令行为的断言。注意：本报告只阅读了测试源码，
+         并未执行测试；“[测试] 覆盖了某行为”不等于“该测试已通过”。
   [无法确认] 静态阅读无法确定的输出，并写明缺少什么依据
 
 
@@ -37,28 +50,33 @@
           了命令行用法，没有其他公开使用文档）。
 
 2. 参数解析与分发：recruiting/cli.py
-   [代码] main()，cli.py:157-163
+   [代码] main()，cli.py:392-398
      args = build_parser().parse_args(argv)
      conn = connect(args.db)
      try:
          return args.handler(conn, args)
      finally:
          conn.close()
-   - 全局参数 --db 为必填（cli.py:136，required=True）。
-   - 子命令为必填（cli.py:137，add_subparsers(..., required=True)）。
-   - 本流程涉及的两个子命令（cli.py:139-147）：
-       add  ：--name、--email、--position 三个选项均 required=True（cli.py:140-142）
-       list ：--position 选项 required=True（cli.py:146）
+   - 全局参数 --db 为必填（cli.py:337，required=True）。
+   - 子命令为必填（cli.py:338，add_subparsers(..., required=True)）。
+   - 本流程涉及的两个子命令：
+       add （cli.py:340-344）：--name、--email、--position 三个选项均
+           required=True（cli.py:341-343），handler 为 cmd_add。
+       list（cli.py:346-351）：--position 选项 required=True（cli.py:347）；
+           --name、--stage、--email 三个选项均无 required，默认省略
+           （cli.py:348-350），handler 为 cmd_list。
    - 进程退出码即 handler 返回值：add/list 成功返回 0，业务校验失败返回 2
      （经 __main__.py 的 sys.exit(main()) 成为命令行退出码）。
 
 3. argparse 层与应用层是两类不同的错误出口：
-   [代码] 缺少 --db、缺少子命令、缺少 --name/--email/--position、选项未知等，
-   由 argparse 自行输出 usage 文本到 stderr 并以退出码 2 终止
-   （parse_args 在 cli.py:158，代码未捕获 SystemExit）。
-   该出口不输出 JSON，不属于应用的 errors 契约；argparse 报错的逐字文本依赖
-   Python 版本，[无法确认] 其确切措辞，依据：未运行、未固定 Python 版本。
-   业务校验错误（见第三、四节）才输出 {"errors": ...} JSON。
+   [代码] 缺少 --db、缺少子命令、缺少 add 的 --name/--email/--position、
+   缺少 list 的 --position、选项未知等，由 argparse 自行输出用法说明（usage）
+   文本到 stderr 并以退出码 2 终止（parse_args 在 cli.py:393，代码未捕获
+   SystemExit）。该出口不输出 JSON，stdout 为空，不属于应用的 errors 契约；
+   argparse 报错的逐字文本依赖 Python 版本，[无法确认] 其确切措辞，依据：
+   未运行、未固定 Python 版本。
+   对照：业务校验错误（见第三、四节）才输出 {"errors": ...} JSON 到 stderr；
+   两类出口退出码同为 2，区分点是 stderr 的内容形态（用法说明 vs errors JSON）。
 
 
 --------------------------------------------------------------------------------
@@ -66,7 +84,7 @@
 --------------------------------------------------------------------------------
 
 1. 存储确为本地 SQLite 文件：[代码] cli.py:4 `import sqlite3`，
-   connect()，cli.py:39-44：
+   connect()，cli.py:42-47：
      conn = sqlite3.connect(db_path)
      conn.execute(SCHEMA)
      conn.commit()
@@ -83,226 +101,286 @@
    - 全部列 NOT NULL；除主键外没有 UNIQUE、CHECK、COLLATE 等任何其他约束
      [代码] 同上，建表语句中不存在这些子句。
 
-3. 保存时机（add）：[代码] cli.py:67-72，业务校验全部通过后执行参数化
-   INSERT，随后立即 conn.commit() 落盘；校验失败时在 cli.py:63-65 提前
-   return，没有任何 INSERT 发生。
+3. 保存时机（add）：[代码] cli.py:76-81，业务校验全部通过后执行参数化
+   INSERT，随后立即 conn.commit() 落盘；校验失败时在 cli.py:72-74 提前
+   return，没有任何 INSERT 发生，即登记失败不新增记录。
 
-4. 查询条件（list）：[代码] cli.py:91-95
-     SELECT id, name, email, position, stage FROM candidates
-      WHERE position = ? ORDER BY id ASC
-   - 参数化绑定，位置精确相等，按 id 升序。[文档] README:14
-     “按岗位精确查询（区分大小写），按 id 升序返回”，与代码一致。
+4. 查询条件（list）：[代码] cli.py:116-129，SQL 以
+     SELECT id, name, email, position, stage FROM candidates WHERE position = ?
+   为基础，按提供的可选条件逐个拼接 AND name = ? / AND email = ? /
+   AND stage = ?，最后 ORDER BY id ASC；全程参数化绑定。查询路径只有 SELECT，
+   没有任何 INSERT/UPDATE/DELETE，即查询不改动任何记录（cli.py:94-133 全文）。
 
-5. 重新打开同一数据文件后取回记录的机制：
+5. 保存后重新打开同一数据库文件仍能取回记录的机制（持久化依据）：
    [代码] 每次 `python -m recruiting` 都是新进程，main() 用同一 --db 路径
-   重新 sqlite3.connect（cli.py:159）；CREATE TABLE IF NOT EXISTS 对已存在
-   的表为空操作，此前 commit 的行仍在文件中，list 的 SELECT 直接读出。
-   [测试] test_set_stage.py:36-42 每个命令都以独立子进程调用同一 db 文件；
-   :44-50（add）、:55-59（list）、:89-100（跨进程断言记录仍在）佐证了
-   “关闭进程后重开文件记录仍在”，虽然该测试文件主体针对 set-stage，
-   其 add/list 持久化证据适用于本流程。
+   重新 sqlite3.connect（cli.py:394）；CREATE TABLE IF NOT EXISTS 对已存在
+   的表为空操作，add 时 commit 的行已写入该文件（cli.py:81），list 的
+   SELECT 直接读出（cli.py:130）。持久化不依赖进程内存，只依赖同一文件路径。
+   [测试] test_add_registration.py:106-121（add 进程结束后另起 list 进程读到
+   同一条记录）、:123-146（重复登记后新 list 进程按 id 升序读到两条）；
+   test_list_filter.py:188-197 与 test_list_name_filter.py:204-213（每次调用
+   都是重新启动的命令，对同一数据库结果一致）。以上均为对测试源码的阅读
+   结论，本报告未执行这些测试。
 
 
 --------------------------------------------------------------------------------
-三、登记流程 cmd_add（cli.py:51-82）
+三、登记流程 cmd_add（cli.py:60-91）
 --------------------------------------------------------------------------------
 
-输入与归一化（cli.py:52-54）：
+输入与归一化（cli.py:61-63）：
      name     = args.name.strip()
      email    = args.email.strip()
      position = args.position.strip()
   - 三个字段都做两端去空白（Python str.strip()），库存值与后续校验都基于
-    去空白后的字符串。[文档] README:21 “字段两端空白会被去除”，一致。
-  - 邮箱不做大小写转换，代码中不存在 lower/upper 调用；[文档] README:21-22
-    “邮箱保留内部大小写”，与代码一致（strip 只去掉两端空白）。
+    去空白后的字符串。[文档] README:30 “字段两端空白会被去除”，一致。
+  - 邮箱不做大小写转换，代码中不存在 lower/upper 调用；[文档] README:30
+    “邮箱保留内部大小写”，与代码一致（strip 只去掉两端空白，内部字符原样）。
 
-校验（cli.py:56-65），错误同时收集到同一个 dict：
-  - name 去空白后为空     -> errors["name"]     = "required"（cli.py:57-58）
-  - email 不合规（见下）  -> errors["email"]    = "invalid" （cli.py:59-60）
+校验（cli.py:65-71），错误同时收集到同一个 dict：
+  - name 去空白后为空     -> errors["name"]     = "required"（cli.py:66-67）
+  - email 不合规（见下）  -> errors["email"]    = "invalid" （cli.py:68-69）
       注意：空邮箱走的是 "invalid" 而不是 "required"；代码里 name/position
-      才有 required 分支。[文档] README:21-22 同为该表述。
-  - position 去空白后为空 -> errors["position"] = "required"（cli.py:61-62）
+      才有 required 分支。[文档] README:30-31 同为该表述。
+  - position 去空白后为空 -> errors["position"] = "required"（cli.py:70-71）
   - errors 非空时：emit_error(errors) 输出到 stderr 后 return 2
-    （cli.py:63-65），不执行 INSERT。
+    （cli.py:72-74），不执行 INSERT，不新增记录。
   - 多字段错误合并为单个 JSON 对象，键的插入顺序固定为 name、email、position
-    [代码] 即上述三段判断的书写顺序。
+    [代码] 即上述三段判断的书写顺序（cli.py:65-71）。
 
-错误输出格式（emit_error，cli.py:47-48）：
-     print(json.dumps({"errors": errors}, ensure_ascii=False), file=sys.stderr)
-  - 单行 JSON、中文不转义；stdout 不打印任何内容；退出码 2。
-  - [文档] README:22-24 描述与代码一致。
+错误输出格式（emit_error，cli.py:50-57）：
+     print(json.dumps({"errors": errors}, ensure_ascii=False, separators=...),
+           file=sys.stderr)
+  - add 走默认分支（emit_error(errors)，cli.py:73）：separators=None，即
+    json.dumps 默认的 ", " / ": " 带空格分隔；单行 JSON、中文不转义；
+    stdout 不打印任何内容；退出码 2。
+  - 紧凑分支（compact=True，separators=(",", ":")）只被 list 使用，见第四节。
+  - [文档] README:30-33 描述与代码一致。
 
-邮箱规则 email_is_invalid(email)（cli.py:23-36，入参为已 strip 的邮箱），
+邮箱规则 email_is_invalid(email)（cli.py:26-39，入参为已 strip 的邮箱），
 逐条返回 invalid 的条件：
-  1. 空串（cli.py:25-26）
-  2. 含任意内部空白字符 ch.isspace()（cli.py:27-28；两端空白已在调用前 strip）
-  3. "@" 数量不等于 1（cli.py:29-30）
-  4. 以唯一 @ 切分后 local 或 domain 为空（cli.py:31-33）
-  5. domain 不含 "."，或以 "." 开头/结尾（cli.py:34-35）
+  1. 空串（cli.py:28-29）
+  2. 含任意内部空白字符 ch.isspace()（cli.py:30-31；两端空白已在调用前 strip）
+  3. "@" 数量不等于 1（cli.py:32-33）
+  4. 以唯一 @ 切分后 local 或 domain 为空（cli.py:34-36）
+  5. domain 不含 "."，或以 "." 开头/结尾（cli.py:37-38）
   其余情况通过。规则之外不做任何检查（见第六节“未检查项”）。
 
-成功写入（cli.py:67-72）：
+成功写入（cli.py:76-81）：
      INSERT INTO candidates (name, email, position, stage)
      VALUES (?, ?, ?, ?)  绑定 (name, email, position, STAGE_APPLIED)
      conn.commit()
 
 成功保存的字段：
   - name     ：去空白后的输入
-  - email    ：去空白后的输入（内部大小写、内部点号等原样）
+  - email    ：去空白后的输入（内部大小写、内部点号等原样保留）
   - position ：去空白后的输入
-  - stage    ：固定写入常量 STAGE_APPLIED = "applied"（cli.py:7，使用点 cli.py:70）
+  - stage    ：固定写入常量 STAGE_APPLIED = "applied"（cli.py:7，使用点
+               cli.py:79、88）。登记生成记录的初始阶段恒为 applied。
   - id       ：不由用户提供，由 candidates.id 的 AUTOINCREMENT 生成
-               （建表 cli.py:11-12），回显取 cursor.lastrowid（cli.py:75）
+               （建表 cli.py:12），回显取 cursor.lastrowid（cli.py:84）。
 
-招聘阶段在当前代码中的真实来源：
-  - 登记时阶段不可由输入指定：add 子解析器没有 --stage 参数（cli.py:139-143），
+招聘阶段在登记路径中的真实来源：
+  - 登记时阶段不可由输入指定：add 子解析器没有 --stage 参数（cli.py:340-343），
     永远写入 cli.py:7 的常量 "applied"。
   - STAGES = ("applied", "interviewing", "hired", "rejected")（cli.py:8）在
-    add/list 路径中完全不被引用；它只被 set-stage 使用（cli.py:110），而
-    set-stage 不在本次追踪范围。即：其余三个阶段在本流程中无来源。
+    add 中不被引用；在 list 中仅用于校验 --stage 的取值（cli.py:110）。
+    即：仅凭 add/list 两个命令，库中记录的 stage 恒为 applied；非 applied
+    阶段只能由不在本流程范围的 set-stage 写入（见第五节注记）。
 
-记录标识在当前代码中的真实来源：
-  - 仅 SQLite 自增主键 id（INTEGER PRIMARY KEY AUTOINCREMENT，cli.py:11-12），
+记录标识的真实来源：
+  - 仅 SQLite 自增主键 id（INTEGER PRIMARY KEY AUTOINCREMENT，cli.py:12），
     代码中没有另外生成 UUID/业务编号；成功输出中的 id 即 cursor.lastrowid
-    （cli.py:75）。
+    （cli.py:84）。
 
-成功输出（cli.py:74-82）：
+成功输出（cli.py:83-91）：
   - stdout 打印单行 JSON 对象，键序固定为
-    id, name, email, position, stage（dict 按 cli.py:74-80 的插入顺序序列化），
-    ensure_ascii=False 中文原样输出；return 0。
+    id, name, email, position, stage（dict 按 cli.py:83-89 的插入顺序序列化），
+    ensure_ascii=False 中文原样输出；return 0（cli.py:91）。
 
 
 --------------------------------------------------------------------------------
-四、按岗位查询流程 cmd_list（cli.py:85-98）
+四、按岗位叠加条件查询流程 cmd_list（cli.py:94-133）
 --------------------------------------------------------------------------------
 
-1. 归一化与校验：
-     position = args.position.strip()（cli.py:86）
-     去空白后为空 -> stderr {"errors": {"position": "required"}}，return 2
-     （cli.py:87-89），不执行查询。
+1. 省略与显式空值的区分（条件组合的前提）：
+   [代码] cli.py:95-98
+     position = args.position.strip()
+     stage = args.stage.strip() if args.stage is not None else None
+     email = args.email.strip() if args.email is not None else None
+     name  = args.name.strip()  if args.name  is not None else None
+   - --position 由 argparse 保证存在（cli.py:347 required=True），直接 strip。
+   - --name/--stage/--email 省略时 argparse 给出 None，代码保留 None 表示
+     “该条件不参与”；显式提供（包括显式空串）时先 strip 再进入校验。
+   - 因此“省略可选参数”与“显式给空值”是两种不同输入：前者不过滤也不报错，
+     后者按下一条报错。
 
-2. 查询与输出（cli.py:91-98）：
-     SELECT id, name, email, position, stage
-       FROM candidates WHERE position = ? ORDER BY id ASC
-     rows -> [dict(zip(FIELDS, row)) ...]（FIELDS 见 cli.py:20，列名与键名一致）
-     stdout 打印 JSON 数组（json.dumps(..., ensure_ascii=False)），return 0。
+2. 校验（cli.py:100-111），错误合并到同一个 dict：
+   - position 去空白后为空            -> errors["position"] = "required"
+     （cli.py:101-102）
+   - name 已提供且去空白后为空        -> errors["name"]     = "required"
+     （cli.py:103-104）
+   - email 已提供且不合规（同第三节 email_is_invalid，含空串）
+                                      -> errors["email"]    = "invalid"
+     （cli.py:105-106）
+   - stage 已提供：去空白后为空       -> errors["stage"]    = "required"
+     （cli.py:107-109）；非空但不在 STAGES（cli.py:8）四值之内
+                                      -> errors["stage"]    = "invalid"
+     （cli.py:110-111）。比较是精确成员判断，大写形式（如 INTERVIEWING）
+     与四值之外的形式（如 offer）同样 invalid。
+   - errors 非空时：emit_error(errors, compact=True)（cli.py:112-114），
+     return 2，不执行查询。
+   - 键的插入顺序固定为 position、name、email、stage [代码] 即 cli.py:100-111
+     的书写顺序。
+   - 查询错误 JSON 为紧凑格式：compact=True 使 separators=(",", ":")
+     （cli.py:53），输出无多余空白的单行 JSON，例如
+     {"errors":{"name":"required","stage":"invalid"}}；与 add 的带空格格式
+     不同（对照 cli.py:73 与 cli.py:113 两个调用点，及 cli.py:51-52 的注释）。
+   - 业务校验失败时 stdout 为空、退出码为 2；缺少必填选项（如 list 不带
+     --position）则走第一节第 3 点的 argparse 出口：同样退出码 2，但 stderr
+     是用法说明而非 errors JSON。
 
-3. 大小写是否区分：区分。
-   [代码] SQL 是普通的 `=` 比较，列定义没有 COLLATE 子句（cli.py:11-18），
-   查询也没有 COLLATE NOCASE / lower() 等处理（cli.py:91-95），使用 SQLite
-   默认 BINARY 排序规则按字节比较：字节不同即不相等（对 ASCII 大小写表现为
-   区分大小写；中文无大小写折叠，字面值不同即不匹配）。
-   [文档] README:14 明确“区分大小写”，与代码一致。
+3. 条件组合与查询（cli.py:116-130）：
+     sql = "SELECT id, name, email, position, stage FROM candidates
+            WHERE position = ?"           （cli.py:116）
+     若 name  非 None：sql += " AND name = ?"  （cli.py:118-122）
+     若 email 非 None：sql += " AND email = ?" （cli.py:123-125）
+     若 stage 非 None：sql += " AND stage = ?" （cli.py:126-128）
+     sql += " ORDER BY id ASC"                 （cli.py:129）
+   - 岗位条件恒存在；姓名、邮箱、阶段省略时不限制结果，提供时各追加一个
+     AND 条件，即所有提供的条件与岗位条件同时成立才算命中。
+   - 全部为参数化绑定（params 列表 cli.py:117-128），无字符串拼接用户输入。
 
-4. 首尾空白：查询词先 strip（cli.py:86），而库存岗位在 add 时也已 strip
-   （cli.py:54），因此 `list --position " 测试工程师 "` 与库存的
-   "测试工程师" 相等可命中；库存中不会因公开登记路径而保留两端空白。
+4. 匹配语义：精确匹配、区分大小写、内部空白有意义。
+   [代码] SQL 是普通的 `=` 比较，列定义没有 COLLATE 子句（cli.py:11-17），
+   查询也没有 COLLATE NOCASE / lower() / LIKE 等处理（cli.py:116-129），
+   使用 SQLite 默认 BINARY 排序规则按字节完整比较：字节不同即不相等。
+   由此（并见 cli.py:119-120 的注释）：
+   - 姓名与邮箱均精确匹配且区分英文字母大小写；中文无大小写折叠，字面值
+     不同即不匹配。
+   - 姓名内部空白有意义：库存 "Lin  Xiao"（双空格）与查询 "Lin Xiao"
+     （单空格）不相等；去两端空白不等于子串匹配，"Lin" 查不到 "Lin Xiao"。
+   - 无唯一性约束（cli.py:10-18），同名（或同邮箱）记录全部返回。
+   - 查询词先 strip（cli.py:95-98），库存值在 add 时也已 strip（cli.py:61-63），
+     因此查询词两端的空白不影响命中，而内部空白逐字节参与比较。
+   [文档] README:35-42 与上述一致。
 
-5. 没有匹配记录时的返回：
-   [代码] fetchall() 得到空列表，json.dumps([]) 打印 `[]` 到 stdout，
-   return 0（cli.py:95-98）。不是错误：stderr 无输出、退出码为 0。
+5. 输出（cli.py:130-133）：
+     rows -> [dict(zip(FIELDS, row)) ...]（FIELDS 见 cli.py:20，键序
+     id, name, email, position, stage），stdout 打印 JSON 数组
+     （json.dumps(..., ensure_ascii=False)，默认带空格分隔），return 0。
+   - 多条命中按 id 升序排列（ORDER BY id ASC，cli.py:129）。
+   - 未命中：fetchall() 得到空列表，stdout 恰好打印 []，return 0
+     （cli.py:130-133）。不是错误：stderr 无输出、退出码为 0。
+   - 输出中 stage 字段直接读自表列；查询路径不计算、不改写任何记录
+     （cli.py:94-133 中只有 SELECT）。
 
-6. 输出中 stage 字段直接读自表列（cli.py:92、96）；本流程登记的行该列恒为
-   applied（第三节），查询路径本身不计算或改写阶段。
+6. 与 add 的关系小结：add 负责“strip → 校验 → INSERT+commit → 对象输出”，
+   list 负责“strip（可选条件保留 None）→ 校验 → 组合 WHERE → 数组输出”；
+   两者共用同一 --db 文件、同一张 candidates 表、同一套邮箱规则与
+   emit_error（格式分支不同），这就是“登记保存的合成资料能被同一数据库的
+   查询读回”的全部机制。
 
 
 --------------------------------------------------------------------------------
 五、固定合成样例（仅静态预期，未执行产品代码）
 --------------------------------------------------------------------------------
 
-固定值：姓名=林示例  邮箱=lin.demo@example.test  岗位=测试工程师
-邮箱对 email_is_invalid 的符合性（逐条核对 cli.py:23-36）：
-非空；无空白；恰有一个 @；local="lin.demo" 非空；domain="example.test"
-非空、含 "." 且不以 "." 开头/结尾 —— 通过校验。
+固定合成资料：姓名=林示例；邮箱 lin.one@example.test / lin.two@example.test /
+lin.dev@example.test；岗位=测试岗 / 开发岗。
+三个邮箱对 email_is_invalid 的符合性（逐条核对 cli.py:26-39）：非空；无空白；
+恰有一个 @；local 非空；domain 含 "." 且不以 "." 开头/结尾 —— 均通过校验。
 
-样例 1：成功登记（全新空数据库文件）
+前置状态（同一个全新的空数据库文件 demo.sqlite3，按序执行）：
+  1. add --name "林示例" --email lin.one@example.test --position "测试岗"
+     -> 落盘 id=1，stage=applied（[代码] cli.py:60-91）
+  2. add --name "林示例" --email lin.two@example.test --position "测试岗"
+     -> 落盘 id=2，stage=applied
+  3. add --name "林示例" --email lin.dev@example.test --position "开发岗"
+     -> 落盘 id=3，stage=applied
+  4. 把 id=2 的阶段改为 interviewing。
+  注记：第 4 步无法由 add 完成（add 恒写 applied，cli.py:79），只能由不在
+  本报告追踪范围的 set-stage 完成；此处仅作为查询示例的前置数据准备，
+  不对该命令的行为下结论。
+  id 说明：1、2、3 是由“全新空表 + AUTOINCREMENT”（cli.py:12）静态确定的；
+  若对已有数据的库执行，id 取决于该库的历史分配，本报告不把任何已有库的
+  id 写成固定值（[无法确认] 非空库的具体 id，缺少依据：未读取任何产品数据库）。
+
+样例 1：按岗位 + 姓名查询（姓名两端带空白）
+  输入形式：
+    python -m recruiting --db demo.sqlite3 list \
+      --position "测试岗" --name " 林示例 "
+  预期（[代码] cli.py:94-133 静态推出）：
+    退出码 0；stderr 为空。" 林示例 " 经 cli.py:98 strip 为 "林示例"；
+    开发岗的 id=3 被岗位条件排除，测试岗内同名两条全部返回、按 id 升序：
+    [{"id": 1, "name": "林示例", "email": "lin.one@example.test", "position": "测试岗", "stage": "applied"}, {"id": 2, "name": "林示例", "email": "lin.two@example.test", "position": "测试岗", "stage": "interviewing"}]
+  [测试] test_list_name_filter.py:129-140 断言了同构行为（同名两条按 id
+  升序返回、姓名两端空白被去除）；本报告未执行该测试。
+
+样例 2：在样例 1 上再叠加阶段与邮箱
+  输入形式：
+    python -m recruiting --db demo.sqlite3 list \
+      --position "测试岗" --name " 林示例 " \
+      --stage interviewing --email lin.two@example.test
+  预期（[代码] cli.py:116-129：四个条件以 AND 同时成立）：
+    退出码 0；stderr 为空；只返回第二条完整候选人 JSON 的单元素数组：
+    [{"id": 2, "name": "林示例", "email": "lin.two@example.test", "position": "测试岗", "stage": "interviewing"}]
+  [测试] test_list_name_filter.py:142-150（姓名+阶段同时成立）、:178-189
+  （姓名+邮箱交集锁定一条）断言了同构行为；本报告未执行该测试。
+
+样例 3：显式空姓名与非法阶段同时出现
+  输入形式：
+    python -m recruiting --db demo.sqlite3 list \
+      --position "测试岗" --name " " --stage offer
+  预期（[代码] cli.py:103-104、110-114、50-57）：
+    退出码 2；stdout 为空；不执行查询、不改任何记录；stderr 恰好一行紧凑
+    JSON（compact=True，无多余空白）：
+    {"errors":{"name":"required","stage":"invalid"}}
+  说明：--name " " 是“显式空值”而非“省略”，故报 name 的 required；
+  offer 不在 STAGES（cli.py:8）四值之内，故报 stage 的 invalid；两个错误
+  合并到同一个 errors 对象。若完全不提供 --name，则不会有 name 错误
+  （cli.py:103 的 is not None 判断）。
+  [测试] test_list_name_filter.py:231-241 对该场景做了字节级断言
+  （stderr 恰为 '{"errors":{"name":"required","stage":"invalid"}}\n'）；
+  本报告未执行该测试。
+
+样例 4：登记成功（承接前置状态之外的新登记）
   输入形式：
     python -m recruiting --db demo.sqlite3 add \
-      --name "林示例" --email lin.demo@example.test --position "测试工程师"
-  预期（[代码] cli.py:51-82 静态推出）：
-    退出码 0；stderr 为空。
-    stdout 单行 JSON（": " 与 ", " 为 json.dumps 默认分隔，中文不转义）：
-    {"id": 1, "name": "林示例", "email": "lin.demo@example.test", "position": "测试工程师", "stage": "applied"}
-  字段性质：
-    - 稳定字段：name/email/position 为去空白后的原样输入；stage 恒为 "applied"
-      （常量 cli.py:7、70）。
-    - 实现生成字段：id。全新空表首行 id=1 可由 SQLite AUTOINCREMENT 语义静态
-      确定；若 demo.sqlite3 已存在且表中已有行，id 取决于该文件的历史分配，
-      [无法确认] 具体数值，缺少的依据：数据库文件当前内容（按要求未运行、
-      未读取任何产品数据库）。
-  持久化效果：行已 commit 到 candidates 表（cli.py:72）。
+      --name "林示例" --email lin.one@example.test --position "测试岗"
+  预期（[代码] cli.py:60-91）：
+    退出码 0；stderr 为空；stdout 单行 JSON（默认带空格分隔）：
+    {"id": 4, "name": "林示例", "email": "lin.one@example.test", "position": "测试岗", "stage": "applied"}
+  说明：邮箱与 id=1 重复也照常落盘——email 列无 UNIQUE 约束、add 无查重
+  （见第六节第 1 点）；id=4 同样依赖“前置状态恰好三行”的前提，对已有库
+  [无法确认]。
 
-样例 2：按岗位查询命中
-  输入形式：
-    python -m recruiting --db demo.sqlite3 list --position "测试工程师"
-  预期（[代码] cli.py:85-98；承接样例 1 的全新库）：
-    退出码 0；stderr 为空；stdout：
-    [{"id": 1, "name": "林示例", "email": "lin.demo@example.test", "position": "测试工程师", "stage": "applied"}]
-  多条命中时按 id 升序排列（ORDER BY id ASC，cli.py:93）。
-  带空白的查询词等价：--position "  测试工程师  " 经 cli.py:86 strip 后同样命中。
-
-样例 3：空姓名（选项存在、值为空或纯空白）
+样例 5：登记校验失败（空姓名 + 不合规邮箱 + 空岗位）
   输入形式：
     python -m recruiting --db demo.sqlite3 add \
-      --name "   " --email lin.demo@example.test --position "测试工程师"
-  预期（[代码] cli.py:57-58、63-65、47-48）：
-    退出码 2；stdout 为空；不写入任何记录（return 在 INSERT 之前）；
-    stderr 单行 JSON：{"errors": {"name": "required"}}
-  说明：若完全不提供 --name 选项，则属于 argparse 层错误（cli.py:140
-  required=True），结果是 argparse usage 文本 + 退出码 2，而非上面的 JSON；
-  逐字文本 [无法确认]（见第一节第 3 点）。
-
-样例 4：空岗位
-  输入形式：
-    python -m recruiting --db demo.sqlite3 add \
-      --name "林示例" --email lin.demo@example.test --position ""
-  预期（[代码] cli.py:61-65）：
-    退出码 2；stdout 为空；不写入记录；
-    stderr：{"errors": {"position": "required"}}
-
-样例 5：无效邮箱（域名无点）
-  输入形式：
-    python -m recruiting --db demo.sqlite3 add \
-      --name "林示例" --email "lin.demo@example" --position "测试工程师"
-  预期（[代码] cli.py:34-35 判定 domain "example" 不含 "."，cli.py:59-60）：
-    退出码 2；stdout 为空；不写入记录；
-    stderr：{"errors": {"email": "invalid"}}
-  同一固定邮箱的其他判定（均为静态核对 cli.py:23-36）：
-    "lin.demo@example.test"      有效（样例 1）
-    " lin.demo@example.test"     有效：两端空白被 strip 后等于固定邮箱
-    "lin.demo@example.test "     有效：同上
-    "lin demo@example.test"      invalid：内部空格（cli.py:27-28）
-    "lin.demoexample.test"       invalid：@ 数量为 0（cli.py:29-30）
-    "lin.demo@exa@mple.test"     invalid：@ 数量为 2（cli.py:29-30）
-    "@example.test"              invalid：local 为空（cli.py:32-33）
-    "lin.demo@"                  invalid：domain 为空（cli.py:32-33）
-    "lin.demo@.test"             invalid：domain 以 "." 开头（cli.py:34）
-    ""（空串）                   invalid：空邮箱判 invalid 而非 required
-  代码不向调用方报告字段级原因（例如“域名缺句点”），错误值只有扁平字符串
-  "invalid"；不存在比这更细的字段信息 [代码] cli.py:59-60。
-
-样例 6：多个字段同时错误（围绕同一登记行为的合并规则）
-  输入形式：空姓名 + 空岗位 + 无效邮箱
-  预期（[代码] cli.py:56-65，键序固定）：
-    退出码 2；stdout 为空；不写入记录；stderr：
+      --name "  " --email "lin.one@example" --position ""
+  预期（[代码] cli.py:65-74、50-57）：
+    退出码 2；stdout 为空；不新增记录（return 在 INSERT 之前）；stderr 为
+    带空格分隔的单行 JSON（add 不走 compact 分支）：
     {"errors": {"name": "required", "email": "invalid", "position": "required"}}
+  说明：邮箱 "lin.one@example" 的 domain 不含 "."（cli.py:37-38）判 invalid；
+  空邮箱同样判 invalid 而非 required（cli.py:68-69 无 required 分支）。
 
-样例 7：按岗位查询未命中
+样例 6：按岗位查询未命中
   输入形式：
     python -m recruiting --db demo.sqlite3 list --position "不存在的岗位"
-  预期（[代码] cli.py:91-98）：
+  预期（[代码] cli.py:130-133）：
     退出码 0；stderr 为空；stdout 恰好为：[]
-  大小写示例（静态规则，非固定样例值）：库存 "Test Engineer" 与查询
-  "test engineer" 字节不同，不命中，同样返回 []（依据见第四节第 3 点）。
 
-样例 8：list 的查询岗位为空
-  输入形式：python -m recruiting --db demo.sqlite3 list --position "   "
-  预期（[代码] cli.py:86-89）：
-    退出码 2；stdout 为空；stderr：{"errors": {"position": "required"}}
+样例 7：缺少必填选项（argparse 层，对照样例 3/5）
+  输入形式：python -m recruiting --db demo.sqlite3 list
+  预期（[代码] cli.py:347 required=True、cli.py:393 未捕获 SystemExit）：
+    退出码 2；stdout 为空；stderr 为 argparse 用法说明文本，不是 errors
+    JSON；逐字文本 [无法确认]（见第一节第 3 点）。
 
 说明：以上 stdout/stderr 的逐字 JSON 可由代码静态确定（序列化参数、键序、
-ensure_ascii=False 均在源码中固定）；唯一不能在不运行时确定的数值是“非空
-库中的新 id”，已在样例 1 中标注。本报告未执行任何上述命令。
+ensure_ascii=False、compact 分支均在源码中固定）；唯一不能在不运行时确定
+的数值是“非空库中的新 id”，已在前置状态注记中标注。本报告未执行任何
+上述命令。
 
 
 --------------------------------------------------------------------------------
@@ -311,88 +389,122 @@ ensure_ascii=False 均在源码中固定）；唯一不能在不运行时确定�
 
 以下情形在 add/list 路径中没有任何校验或分支，静态依据为“对应代码不存在”：
   1. 邮箱重复：candidates.email 无 UNIQUE 约束（cli.py:10-18），cmd_add 在
-     INSERT 前没有查重查询（cli.py:51-72）——同一邮箱可重复登记，各得新 id。
+     INSERT 前没有查重查询（cli.py:60-81）——同一邮箱可重复登记，各得新 id。
+     [测试] test_add_registration.py:123-146 断言了该行为（未执行）。
   2. 姓名/岗位除“去空白后非空”外无任何限制：无长度上限、无字符集规则、
-     姓名与岗位之间无关联校验（cli.py:56-62 仅有空值判断）。
-  3. 邮箱在第五节五条规则之外不再检查：不校验域名后缀、不查 MX、含 "+"、
-     多个点号等一律通过（cli.py:23-36 是全部规则）。
-  4. list 只按岗位精确相等过滤：无姓名/邮箱/stage 过滤、无模糊匹配、无分页、
-     无全量列表入口（--position 必填，cli.py:146；SQL 见 cli.py:91-95）。
+     姓名与岗位之间无关联校验（cli.py:66-71、101-104 仅有空值判断）。
+  3. 邮箱在第三节五条规则之外不再检查：不校验域名后缀、不查 MX、含 "+"、
+     多个点号等一律通过（cli.py:26-39 是全部规则）。
+  4. list 除岗位/姓名/邮箱/阶段的精确相等外无其他过滤：无模糊匹配、无分页、
+     无全量列表入口（--position 必填，cli.py:347；SQL 见 cli.py:116-129）。
   5. 数据库层面的运行期异常（--db 路径不可写、文件损坏、磁盘错误等）代码不
-     捕获：main 只有 try/finally 关闭连接，没有 except（cli.py:157-163），
+     捕获：main 只有 try/finally 关闭连接，没有 except（cli.py:392-398），
      sqlite3 异常将以 Python 回溯形式抛出，回溯文本与退出码（未捕获异常通常
      为 1）[无法确认] 于不运行时逐字给出；README 也未文档化此类情形。
 
 
 --------------------------------------------------------------------------------
-七、已实现行为与总目标要求之间的差距
+七、测试覆盖索引（阅读测试源码的结论，不等于测试通过）
 --------------------------------------------------------------------------------
 
-[文档] README:3 将产品长期方向表述为“计划整理候选人资料、招聘职位和面试
-进度”。当前仓库与本流程相关的实际实现仅有：
-  - 一个命令行入口（python -m recruiting）、三个子命令
-    add / list / set-stage（cli.py:139-152）；
-  - 一张 SQLite 表 candidates 与第五节所述的 JSON 输入输出契约。
+本报告未执行任何测试；以下仅为测试文件“断言了什么”的索引。
 
-[未实现] / 无证据项（缺口与所缺证据）：
-  1. 登记时不能指定招聘阶段：add 无 --stage 入口（cli.py:139-143），
-     interviewing/hired/rejected 在本流程中无任何写入来源；STAGES
-     （cli.py:8）仅被不在本次范围的 set-stage 引用（cli.py:110）。
-  2. 面试、评价、日程、报表：全仓库（文件清单见开头）不存在相关模块、
-     函数、子命令或文档章节——缺少源码入口与公开使用文档两方面证据。
-  3. 没有命令行以外的入口：无 Web/API/UI/服务端代码，无 requirements/打包
-     元数据（仓库清单中不存在对应文件）；__init__.py 仅导出 main。
-  4. 没有候选人资料的更新（除 stage 外）、删除、按 id/邮箱查询等命令：
-     build_parser 只注册了三个子命令（cli.py:137-152）。
-  以上各项在 README 中也没有被描述为“已实现”；README:3 的措辞为“计划”。
+test_add_registration.py（add 登记）：
+  :106-121  有效输入落盘为 applied，另一独立 list 进程读回同一条记录
+  :123-146  相同资料（含相同邮箱）可重复登记，id 不同，按 id 升序返回
+  :184-200  空姓名/空岗位 -> required，不合规邮箱 -> invalid，失败不写库
+  :202-215  三字段同时错误合并为单个 errors 对象（字节级断言带空格格式）
+  :218-247  空数据库上的各类失败登记后仍无候选人
+
+test_list_filter.py（list 岗位+阶段）：
+  :121-130  岗位与阶段联合查询取交集、按 id 升序
+  :132-138  省略 --stage 返回该岗位全部记录
+  :161-177  岗位与阶段查询词两端空白被去除
+  :188-197  每次调用都是新进程，同一数据库结果一致
+  :199-208、:299-306  成功与失败查询均不改动任何记录
+  :244-255  英文岗位区分大小写
+  :259-270  省略 --stage 与显式空 --stage 是两种行为（后者 required）
+  :272-278  未知阶段 offer、大写阶段 INTERVIEWING 均 invalid
+  :280-289  空白岗位 -> position 的 required
+  :291-297  空白岗位与 offer 同时出现时两项错误合并到一个 errors 对象
+
+test_list_name_filter.py（list 姓名/邮箱叠加）：
+  :129-133  岗位内同名记录全部返回（id 1、3），按 id 升序
+  :135-140  --name 两端空白去除后完整匹配
+  :142-150  姓名与阶段同时成立才命中
+  :152-159  姓名筛选限定在岗位之内（开发岗同名者不出现）
+  :161-164  省略 --name 不限制结果
+  :178-189  姓名与邮箱交集可在同名者中锁定一条
+  :204-213  重启命令对同一数据库结果一致
+  :215-221、:267-271  成功与失败查询均不改动任何记录
+  :225-229  显式空姓名 -> name 的 required
+  :231-241  空姓名 + offer -> 字节级紧凑 JSON
+            {"errors":{"name":"required","stage":"invalid"}}
+  :243-260  多字段错误合并（position+name；name+email+stage）
+  :262-265  省略 --name 时即使其他条件非法也不报 name 错误
+  :310-319  英文姓名区分大小写
+  :321-334  内部空白有意义、无子串匹配
 
 
 --------------------------------------------------------------------------------
 八、文档结论与代码结论对照（本流程范围内）
 --------------------------------------------------------------------------------
 
-README 说法                                  代码核对结果
--------------------------------------------  ----------------------------------
-README:7 首次操作自动创建数据库文件与表      一致：connect() cli.py:39-44
-README:10-12 add 用法，stage 固定 applied    一致：cli.py:70、139-143
-README:14-15 list 精确、区分大小写、id 升序  一致：cli.py:91-95（BINARY 比较）
-README:21 字段两端空白去除                   一致：cli.py:52-54、86
-README:21-22 邮箱保留内部大小写              一致：无任何大小写转换
-README:21-22 姓名/岗位空 -> required         一致：cli.py:57-58、61-62
-README:22 邮箱不合规 -> invalid              一致：cli.py:23-36、59-60
-README:22-24 多错误合并单 JSON、stderr、     一致：cli.py:47-48、56-65；
-              退出码 2、不写入                    无 INSERT 的早返回 cli.py:63-65
-README:24 成功结果 JSON 到 stdout、退出码 0  一致：cli.py:74-82、97-98
-README:3 “计划整理……面试进度”               长期目标；仓库无对应实现（见第七节）
+README 说法                                        代码核对结果
+-------------------------------------------------  ----------------------------------
+README:7 首次操作自动创建数据库文件与表            一致：connect() cli.py:42-47
+README:10-12 add 用法，stage 固定 applied          一致：cli.py:79、88、340-343
+README:14-15 list 精确、区分大小写、id 升序        一致：cli.py:116-129（BINARY 比较）
+README:17-18 list 可按姓名精确查找                 一致：cli.py:118-122、348
+README:30 字段两端空白去除                         一致：cli.py:61-63、95-98
+README:30 邮箱保留内部大小写                       一致：无任何大小写转换
+README:30-31 姓名/岗位空 -> required               一致：cli.py:66-71、101-104
+README:31 邮箱不合规 -> invalid                    一致：cli.py:26-39、68-69、105-106
+README:31-33 多错误合并单 JSON、stderr、           一致：cli.py:50-57、65-74；
+             退出码 2、不写入                           无 INSERT 的早返回 cli.py:72-74
+README:32-33 成功结果 JSON 到 stdout、退出码 0     一致：cli.py:83-91、130-133
+README:35-42 list 必传岗位，--name/--stage/--email 一致：cli.py:94-133、346-351
+             可选，省略不过滤、提供时同时成立；
+             空值 required、非法阶段/邮箱 invalid、
+             结果按 id 升序、未命中 []、查询不改记录
+README:3 “计划整理……面试进度”                     长期目标；面试/评价/日程/报表在
+                                                   仓库中无对应实现
 
 范围内未发现 README 与代码相矛盾之处。
 
 
 --------------------------------------------------------------------------------
-九、关键证据索引（文件:行号）
+九、关键证据索引（文件:行号，均为当前源码）
 --------------------------------------------------------------------------------
 
-recruiting/__main__.py:3-6    命令行入口、sys.exit(main())
-recruiting/__init__.py:3      导出 main
-recruiting/cli.py:7           STAGE_APPLIED = "applied"（登记阶段唯一来源）
-recruiting/cli.py:8           STAGES 四元组（add/list 不引用）
-recruiting/cli.py:10-18       candidates 建表语句（列、NOT NULL、AUTOINCREMENT）
-recruiting/cli.py:20          FIELDS 输出键序
-recruiting/cli.py:23-36       email_is_invalid 五条邮箱规则
-recruiting/cli.py:39-44       connect：打开/创建库、幂等建表、commit
-recruiting/cli.py:47-48       emit_error：errors JSON -> stderr
-recruiting/cli.py:51-82       cmd_add：strip、校验、INSERT+commit、成功输出
-recruiting/cli.py:57-62       name/email/position 三类错误判定
-recruiting/cli.py:63-65       校验失败提前返回（无写入）
-recruiting/cli.py:67-72       参数化 INSERT 与落盘时机
-recruiting/cli.py:74-80       成功记录字段与 id=lastrowid
-recruiting/cli.py:85-98       cmd_list：strip、required、SQL、空结果为 []
-recruiting/cli.py:91-95       WHERE position = ? ORDER BY id ASC
-recruiting/cli.py:134-154     build_parser：--db、子命令与各选项注册
-recruiting/cli.py:157-163     main：解析、连接、分发、finally 关闭（无 except）
-test_set_stage.py:36-42       每条命令独立子进程调用同一 db 文件
-test_set_stage.py:44-59       add/list 的公开命令调用方式（测试内佐证）
-README.md:3,7,10-15,21-24     本流程相关文档表述（对照见第八节）
+recruiting/__main__.py:3-6      命令行入口、sys.exit(main())
+recruiting/__init__.py:3        导出 main
+recruiting/cli.py:7             STAGE_APPLIED = "applied"（登记阶段唯一来源）
+recruiting/cli.py:8             STAGES 四元组（list 用于校验 --stage，cli.py:110）
+recruiting/cli.py:10-18         candidates 建表语句（列、NOT NULL、AUTOINCREMENT）
+recruiting/cli.py:20            FIELDS 输出键序
+recruiting/cli.py:26-39         email_is_invalid 五条邮箱规则
+recruiting/cli.py:42-47         connect：打开/创建库、幂等建表、commit
+recruiting/cli.py:50-57         emit_error：errors JSON -> stderr；compact 分支
+recruiting/cli.py:60-91         cmd_add：strip、校验、INSERT+commit、成功输出
+recruiting/cli.py:65-71         add 的 name/email/position 三类错误判定
+recruiting/cli.py:72-74         add 校验失败提前返回（无写入）
+recruiting/cli.py:76-81         参数化 INSERT 与落盘时机
+recruiting/cli.py:83-91         成功记录字段与 id=lastrowid
+recruiting/cli.py:94-133        cmd_list：strip/None、校验、组合 SQL、输出
+recruiting/cli.py:95-98         可选条件省略为 None、提供则 strip
+recruiting/cli.py:100-111       list 的 position/name/email/stage 四类错误判定
+recruiting/cli.py:112-114       list 校验失败：紧凑 errors JSON、return 2
+recruiting/cli.py:116-129       WHERE position = ? 叠加 AND name/email/stage，
+                                ORDER BY id ASC
+recruiting/cli.py:130-133       执行查询、空结果输出 []、return 0
+recruiting/cli.py:335-389       build_parser：--db、各子命令与选项注册
+recruiting/cli.py:346-351       list：--position 必填，--name/--stage/--email 可选
+recruiting/cli.py:392-398       main：解析、连接、分发、finally 关闭（无 except）
+test_add_registration.py        add 行为断言索引（见第七节）
+test_list_filter.py             list 岗位+阶段断言索引（见第七节）
+test_list_name_filter.py        list 姓名/邮箱叠加断言索引（见第七节）
+README.md:3,7,10-18,30-42       本流程相关文档表述（对照见第八节）
 
 ================================================================================
 报告结束
