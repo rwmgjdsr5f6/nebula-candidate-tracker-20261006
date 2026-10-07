@@ -202,26 +202,48 @@ def update_candidate_field(conn, candidate_id, field, value, validate_field,
     return 0
 
 
-def cmd_get(conn, args):
-    """按 id 查看单个候选人，只读查询，不改动任何记录。"""
-    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
+def resolve_readonly_candidate_id(conn, candidate_id):
+    """get 与 stage-history 共用的只读按 id 定位流程。
+
+    集中维护这两个只读命令的定位规则：先按去空白后的 id 规则校验，
+    再挡住超出 SQLite 整数上限的输入，最后检查候选人是否存在。合法
+    且存在时返回 (对应整数, None)；任一环节失败时已向 stderr 输出
+    单行 errors JSON，返回 (None, 2)。全程只读取数据，不改动任何
+    记录；具体取哪些列交给调用方的后续查询。
+    """
+    id_error, candidate_id_int = validate_candidate_id(candidate_id)
     if id_error is not None:
         emit_error({"id": id_error})
-        return 2
+        return None, 2
 
     if candidate_id_int > SQLITE_INT64_MAX:
         # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
         # 避免绑定参数时抛出 OverflowError。
         emit_error({"id": "not_found"})
-        return 2
+        return None, 2
     row = conn.execute(
-        "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
+        "SELECT id FROM candidates WHERE id = ?",
         (candidate_id_int,),
     ).fetchone()
     if row is None:
         emit_error({"id": "not_found"})
-        return 2
+        return None, 2
 
+    return candidate_id_int, None
+
+
+def cmd_get(conn, args):
+    """按 id 查看单个候选人，只读查询，不改动任何记录。"""
+    candidate_id_int, returncode = resolve_readonly_candidate_id(
+        conn, args.id.strip()
+    )
+    if returncode is not None:
+        return returncode
+
+    row = conn.execute(
+        "SELECT id, name, email, position, stage FROM candidates WHERE id = ?",
+        (candidate_id_int,),
+    ).fetchone()
     print(json.dumps(dict(zip(FIELDS, row)), ensure_ascii=False))
     return 0
 
@@ -262,23 +284,11 @@ def cmd_set_stage(conn, args):
 
 def cmd_stage_history(conn, args):
     """按 id 查看候选人的阶段变更历史，只读查询，不改动任何记录。"""
-    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
-    if id_error is not None:
-        emit_error({"id": id_error})
-        return 2
-
-    if candidate_id_int > SQLITE_INT64_MAX:
-        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
-        # 避免绑定参数时抛出 OverflowError。
-        emit_error({"id": "not_found"})
-        return 2
-    row = conn.execute(
-        "SELECT id FROM candidates WHERE id = ?",
-        (candidate_id_int,),
-    ).fetchone()
-    if row is None:
-        emit_error({"id": "not_found"})
-        return 2
+    candidate_id_int, returncode = resolve_readonly_candidate_id(
+        conn, args.id.strip()
+    )
+    if returncode is not None:
+        return returncode
 
     rows = conn.execute(
         "SELECT from_stage, to_stage FROM stage_history"
