@@ -328,20 +328,47 @@ def validate_feedback_text(text):
     return None, text
 
 
+def validate_feedback_payload(raw_id, id_field, raw_text):
+    """add-feedback 与 set-feedback 共用的编号与文本校验流程。
+
+    编号与文本都先去除两端空白。编号沿用 validate_candidate_id：只接受
+    ASCII 数字组成的正整数（允许前导零），空值、全零、负数、带正号、
+    小数或非 ASCII 数字均为 invalid；追加评价时以 "id" 为键，更正评价
+    时以 "feedback_id" 为键，两个入口互不混用。文本去空白后为空时以
+    "text" 报告 required。
+
+    两项校验互不短路：编号非法且文本为空时，两项错误合并进同一个 errors
+    对象。编号只要格式合法就算通过参数校验，记录是否存在留给调用方按各
+    自的表查询，因此合法但不存在的编号配合空文本时只报告 text 的
+    required。
+
+    返回 (errors, 编号整数, 去空白后文本)；编号或文本校验失败时，对应
+    返回值为 None。调用方只需在 errors 非空时输出单行 errors JSON 并以
+    退出码 2 返回，存在性检查与写入语义仍由两条入口各自保留。
+    """
+    errors = {}
+    id_error, target_id = validate_candidate_id(raw_id.strip())
+    if id_error is not None:
+        errors[id_field] = id_error
+    text_error, text = validate_feedback_text(raw_text)
+    if text_error is not None:
+        errors["text"] = text_error
+    return errors, target_id, text
+
+
 def cmd_add_feedback(conn, args):
     """为已登记候选人追加一条合成评价。
 
-    先合并完成 id 与文本的全部校验，再查找候选人；任一步失败都只向
-    标准错误输出单行 errors JSON、返回 2，且不写入评价。重复提交相同
-    文本也插入独立记录，评价 id 由 AUTOINCREMENT 保证唯一且递增。
+    编号（候选人 id）与文本的参数校验与 set-feedback 共用
+    validate_feedback_payload：任一失败都把 errors 合并为单行 JSON 输出
+    到标准错误、返回 2，且不写入评价。校验通过后编号只在 candidates 表
+    定位候选人，不存在（含超出 SQLite 整数上限的 9223372036854775808）
+    按 id 的 not_found 处理。重复提交相同文本也插入独立记录，评价 id 由
+    AUTOINCREMENT 保证唯一且递增。
     """
-    errors = {}
-    id_error, candidate_id_int = validate_candidate_id(args.id.strip())
-    if id_error is not None:
-        errors["id"] = id_error
-    text_error, text = validate_feedback_text(args.text)
-    if text_error is not None:
-        errors["text"] = text_error
+    errors, candidate_id_int, text = validate_feedback_payload(
+        args.id, "id", args.text
+    )
     if errors:
         emit_error(errors)
         return 2
@@ -419,21 +446,21 @@ def find_feedback(conn, feedback_id_int):
 def cmd_set_feedback(conn, args):
     """按评价 id 更正一条合成评价的文字。
 
-    先合并完成 feedback_id 与文本的全部参数校验，再查找评价；任一环节
+    feedback_id 与文本的参数校验与 add-feedback 共用
+    validate_feedback_payload（编号键固定为 "feedback_id"）：任一环节
     失败都只向标准错误输出单行 errors JSON、返回 2，不改动任何记录。
+    编号只要格式合法就进入评价定位（合法但不存在的编号配合空文本时，
+    参数校验阶段只报告 text 的 required）。定位由 find_feedback 在
+    feedback 表完成，与候选人 id 互不混用；超出 SQLite 整数上限的
+    9223372036854775808 按 feedback_id 的 not_found 处理。
+
     成功时只替换目标评价的 text，保留 id 与 candidate_id，不新增评价；
     重复更正为当前文字也按成功处理，不改变候选人资料、阶段历史或岗位
     统计。
     """
-    errors = {}
-    feedback_id_error, feedback_id_int = validate_candidate_id(
-        args.feedback_id.strip()
+    errors, feedback_id_int, text = validate_feedback_payload(
+        args.feedback_id, "feedback_id", args.text
     )
-    if feedback_id_error is not None:
-        errors["feedback_id"] = feedback_id_error
-    text_error, text = validate_feedback_text(args.text)
-    if text_error is not None:
-        errors["text"] = text_error
     if errors:
         emit_error(errors)
         return 2
