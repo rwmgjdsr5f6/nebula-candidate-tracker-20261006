@@ -368,6 +368,30 @@ def cmd_list_feedback(conn, args):
     return 0
 
 
+def find_feedback(conn, feedback_id_int):
+    """set-feedback 与 delete-feedback 共用的评价定位流程。
+
+    集中维护 SQLite 整数上限处理与存在性查询：超出上限的合法 id 必然
+    不存在，直接按 not_found 处理，避免绑定参数时抛出 OverflowError。
+    找到时返回 (id, candidate_id, text) 行；未找到时只向标准错误输出
+    单行 errors JSON 并返回 None，由调用命令以退出码 2 返回。全程只
+    读取数据，不改动任何记录。
+    """
+    if feedback_id_int > SQLITE_INT64_MAX:
+        emit_error({"feedback_id": "not_found"})
+        return None
+
+    row = conn.execute(
+        "SELECT id, candidate_id, text FROM feedback WHERE id = ?",
+        (feedback_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"feedback_id": "not_found"})
+        return None
+
+    return row
+
+
 def cmd_set_feedback(conn, args):
     """按评价 id 更正一条合成评价的文字。
 
@@ -390,18 +414,8 @@ def cmd_set_feedback(conn, args):
         emit_error(errors)
         return 2
 
-    if feedback_id_int > SQLITE_INT64_MAX:
-        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
-        # 避免绑定参数时抛出 OverflowError。
-        emit_error({"feedback_id": "not_found"})
-        return 2
-
-    row = conn.execute(
-        "SELECT id, candidate_id, text FROM feedback WHERE id = ?",
-        (feedback_id_int,),
-    ).fetchone()
+    row = find_feedback(conn, feedback_id_int)
     if row is None:
-        emit_error({"feedback_id": "not_found"})
         return 2
 
     conn.execute(
@@ -431,18 +445,8 @@ def cmd_delete_feedback(conn, args):
         emit_error({"feedback_id": feedback_id_error})
         return 2
 
-    if feedback_id_int > SQLITE_INT64_MAX:
-        # 超出 SQLite 整数范围的 id 必然不存在，直接按 not_found 处理，
-        # 避免绑定参数时抛出 OverflowError。
-        emit_error({"feedback_id": "not_found"})
-        return 2
-
-    row = conn.execute(
-        "SELECT id, candidate_id, text FROM feedback WHERE id = ?",
-        (feedback_id_int,),
-    ).fetchone()
+    row = find_feedback(conn, feedback_id_int)
     if row is None:
-        emit_error({"feedback_id": "not_found"})
         return 2
 
     conn.execute("DELETE FROM feedback WHERE id = ?", (feedback_id_int,))
