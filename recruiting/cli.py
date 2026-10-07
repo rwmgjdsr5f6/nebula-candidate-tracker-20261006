@@ -349,6 +349,48 @@ def cmd_add_feedback(conn, args):
     return 0
 
 
+def cmd_set_feedback(conn, args):
+    """按评价编号更正一条合成评价的文字。
+
+    先合并完成 feedback_id 与文本的全部校验，再查找评价记录；任一步
+    失败都只向标准错误输出单行 errors JSON、返回 2，且不改动任何
+    记录。成功时只替换目标评价的 text，保留 id 与 candidate_id，
+    重复更正为当前文字也成功且不新增评价。
+    """
+    errors = {}
+    id_error, feedback_id_int = validate_candidate_id(args.feedback_id.strip())
+    if id_error is not None:
+        errors["feedback_id"] = id_error
+    text = args.text.strip()
+    if not text:
+        errors["text"] = "required"
+    if errors:
+        emit_error(errors)
+        return 2
+
+    if feedback_id_int > SQLITE_INT64_MAX:
+        # 超出 SQLite 整数范围的编号必然不存在，直接按 not_found 处理，
+        # 避免绑定参数时抛出 OverflowError。
+        emit_error({"feedback_id": "not_found"})
+        return 2
+    row = conn.execute(
+        "SELECT id, candidate_id, text FROM feedback WHERE id = ?",
+        (feedback_id_int,),
+    ).fetchone()
+    if row is None:
+        emit_error({"feedback_id": "not_found"})
+        return 2
+
+    conn.execute(
+        "UPDATE feedback SET text = ? WHERE id = ?",
+        (text, feedback_id_int),
+    )
+    conn.commit()
+    record = {"id": row[0], "candidate_id": row[1], "text": text}
+    print(json.dumps(record, ensure_ascii=False))
+    return 0
+
+
 def cmd_list_feedback(conn, args):
     """按 id 查看候选人的全部合成评价，只读查询，不改动任何记录。"""
     candidate_id_int = resolve_candidate_id(conn, args.id)
@@ -530,6 +572,13 @@ def build_parser():
     )
     list_feedback_parser.add_argument("--id", required=True)
     list_feedback_parser.set_defaults(handler=cmd_list_feedback)
+
+    set_feedback_parser = subparsers.add_parser(
+        "set-feedback", help="按评价编号更正合成评价文字"
+    )
+    set_feedback_parser.add_argument("--feedback-id", required=True)
+    set_feedback_parser.add_argument("--text", required=True)
+    set_feedback_parser.set_defaults(handler=cmd_set_feedback)
 
     set_email_parser = subparsers.add_parser("set-email", help="按 id 更正候选人邮箱")
     set_email_parser.add_argument("--id", required=True)
