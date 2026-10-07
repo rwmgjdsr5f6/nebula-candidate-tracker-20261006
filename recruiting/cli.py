@@ -304,6 +304,19 @@ def cmd_stage_history(conn, args):
     return 0
 
 
+def validate_feedback_text(text):
+    """add-feedback 与 set-feedback 共用的评价文本规则。
+
+    去除两端空白后保存；内部空白、换行、中文与英文字母大小写原样保留。
+    去空白后为空（空字符串或纯空白）返回 ("required", None)，否则返回
+    (None, 去空白后的文本)。
+    """
+    text = text.strip()
+    if not text:
+        return "required", None
+    return None, text
+
+
 def cmd_add_feedback(conn, args):
     """为已登记候选人追加一条合成评价。
 
@@ -315,9 +328,9 @@ def cmd_add_feedback(conn, args):
     id_error, candidate_id_int = validate_candidate_id(args.id.strip())
     if id_error is not None:
         errors["id"] = id_error
-    text = args.text.strip()
-    if not text:
-        errors["text"] = "required"
+    text_error, text = validate_feedback_text(args.text)
+    if text_error is not None:
+        errors["text"] = text_error
     if errors:
         emit_error(errors)
         return 2
@@ -407,9 +420,9 @@ def cmd_set_feedback(conn, args):
     )
     if feedback_id_error is not None:
         errors["feedback_id"] = feedback_id_error
-    text = args.text.strip()
-    if not text:
-        errors["text"] = "required"
+    text_error, text = validate_feedback_text(args.text)
+    if text_error is not None:
+        errors["text"] = text_error
     if errors:
         emit_error(errors)
         return 2
