@@ -109,12 +109,40 @@ def cmd_add(conn, args):
     return 0
 
 
+def validate_limit(raw_limit):
+    """--limit 去空白后的规则：ASCII 数字组成的正整数（允许前导零）。
+
+    合法返回对应整数；显式空值、纯空白、全零、负数、带正号、小数、
+    非 ASCII 数字或超过 SQLite int64 上限 9223372036854775807 均返回
+    None，由调用方报告 limit 的 invalid。与 validate_candidate_id 不同，
+    超出上限的 limit 不是 not_found 场景，直接按 invalid 处理。
+    """
+    if not re.fullmatch(r"[0-9]+", raw_limit):
+        return None
+    digits = raw_limit.lstrip("0")
+    if not digits:
+        return None
+    if len(digits) > len(_SQLITE_INT64_MAX_DIGITS) or (
+        len(digits) == len(_SQLITE_INT64_MAX_DIGITS)
+        and digits > _SQLITE_INT64_MAX_DIGITS
+    ):
+        return None
+    return int(digits)
+
+
 def cmd_list(conn, args):
     stage = args.stage.strip() if args.stage is not None else None
     email = args.email.strip() if args.email is not None else None
     name = args.name.strip() if args.name is not None else None
 
     errors = {}
+    # --limit 省略时不限制条数；提供时先按参数校验，失败与其他筛选字段的
+    # 错误合并报告，互不影响。
+    limit = None
+    if args.limit is not None:
+        limit = validate_limit(args.limit.strip())
+        if limit is None:
+            errors["limit"] = "invalid"
     # 全岗位模式不接收岗位条件，也不做岗位校验；岗位模式下去空白后
     # 不能为空。
     position = None
@@ -165,6 +193,10 @@ def cmd_list(conn, args):
         sql += " WHERE " + " AND ".join(clauses)
     # 全岗位模式同样按 id 全局升序，不按岗位分组。
     sql += " ORDER BY id ASC"
+    if limit is not None:
+        # 交集筛选、全局排序之后再截取前 N 条，不按岗位分别取数。
+        sql += " LIMIT ?"
+        params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     records = [dict(zip(FIELDS, row)) for row in rows]
     print(json.dumps(records, ensure_ascii=False))
@@ -680,6 +712,10 @@ def build_parser():
     list_parser.add_argument("--name")
     list_parser.add_argument("--stage")
     list_parser.add_argument("--email")
+    list_parser.add_argument(
+        "--limit",
+        help="只返回按 id 全局升序的前 N 条（ASCII 数字正整数，允许前导零）",
+    )
     list_parser.add_argument(
         "--without-feedback",
         action="store_true",

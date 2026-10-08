@@ -1,0 +1,4 @@
+usage: recruiting list [-h] (--position POSITION | --all-positions)
+                       [--name NAME] [--stage STAGE] [--email EMAIL]
+                       [--limit LIMIT] [--without-feedback]
+recruiting list: error: argument --position: not allowed with argument --all-positions
