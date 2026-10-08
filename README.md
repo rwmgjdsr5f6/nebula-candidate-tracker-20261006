@@ -27,6 +27,10 @@ python -m recruiting --db demo.sqlite3 list --all-positions --name "林晓" --st
 python -m recruiting --db demo.sqlite3 list --position "测试工程师" --without-feedback
 python -m recruiting --db demo.sqlite3 list --all-positions --without-feedback
 
+# 只查看按 id 全局升序排列的前 N 条匹配记录（可选，两种范围模式均支持）
+python -m recruiting --db demo.sqlite3 list --all-positions --limit 2
+python -m recruiting --db demo.sqlite3 list --position "测试工程师" --without-feedback --limit 1
+
 # 按 id 修改候选人阶段（applied/interviewing/hired/rejected 均可互转）
 python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
 
@@ -84,6 +88,16 @@ id 升序，查询不改动任何记录。
 的人也算没有评价，追加首条评价后即退出结果。开关可与 `--name`、`--email`、
 `--stage` 组合，所有条件同时成立才返回；给开关附带值按命令行用法错误结束
 （退出码 2、标准输出为空、标准错误为用法说明）。
+
+两种范围模式还都支持可选的 `--limit N`：省略时返回全部匹配记录；提供时与
+姓名、邮箱、阶段及 `--without-feedback` 等筛选条件取交集后，再按 id 全局
+升序取前 N 条（不按岗位分别取数），匹配数不足 N 时完整返回。N 去除两端
+空白后须为 ASCII 数字组成的正整数，允许前导零，最大为
+9223372036854775807；显式空值、纯空白、全零、负数、带正号、小数、非
+ASCII 数字或超出上限均返回 `limit` 的 `invalid`。字段错误沿用 list 协议
+（与其他字段错误合并进同一个紧凑 `errors` 对象，标准错误单行、标准输出
+为空、退出码 2）；缺少 `--limit` 的值按命令行用法错误结束（标准错误为
+用法说明、标准输出为空、退出码 2）。
 
 `set-stage` 的阶段去除两端空白后按小写精确匹配，须为
 `applied`、`interviewing`、`hired`、`rejected` 之一：为空返回

@@ -109,6 +109,28 @@ def cmd_add(conn, args):
     return 0
 
 
+def validate_limit(raw_limit):
+    """list 的 --limit 去两端空白后的规则：须为 ASCII 数字组成的正整数。
+
+    允许前导零，上限为 9223372036854775807；显式空值、纯空白、全零、
+    负数、带正号、小数、非 ASCII 数字或超出上限均返回
+    ("invalid", None)，合法时返回 (None, 对应整数)。
+    """
+    limit = raw_limit.strip()
+    if not re.fullmatch(r"[0-9]+", limit):
+        return "invalid", None
+    digits = limit.lstrip("0")
+    if not digits:
+        # 全零（含 "0" 与任意多个 "0"）不是正整数。
+        return "invalid", None
+    if len(digits) > len(_SQLITE_INT64_MAX_DIGITS) or (
+        len(digits) == len(_SQLITE_INT64_MAX_DIGITS)
+        and digits > _SQLITE_INT64_MAX_DIGITS
+    ):
+        return "invalid", None
+    return None, int(digits)
+
+
 def cmd_list(conn, args):
     stage = args.stage.strip() if args.stage is not None else None
     email = args.email.strip() if args.email is not None else None
@@ -131,6 +153,11 @@ def cmd_list(conn, args):
             errors["stage"] = "required"
         elif stage not in STAGES:
             errors["stage"] = "invalid"
+    limit = None
+    if args.limit is not None:
+        limit_error, limit = validate_limit(args.limit)
+        if limit_error is not None:
+            errors["limit"] = limit_error
     if errors:
         emit_error(errors, compact=True)
         return 2
@@ -165,6 +192,11 @@ def cmd_list(conn, args):
         sql += " WHERE " + " AND ".join(clauses)
     # 全岗位模式同样按 id 全局升序，不按岗位分组。
     sql += " ORDER BY id ASC"
+    if limit is not None:
+        # 全部筛选条件取交集后，再按 id 全局升序截取前 N 条，不按岗位
+        # 分别取数；匹配数不足 N 时由数据库自然返回全部匹配记录。
+        sql += " LIMIT ?"
+        params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     records = [dict(zip(FIELDS, row)) for row in rows]
     print(json.dumps(records, ensure_ascii=False))
@@ -684,6 +716,10 @@ def build_parser():
         "--without-feedback",
         action="store_true",
         help="只列出当前没有任何评价归属到其 id 的候选人",
+    )
+    list_parser.add_argument(
+        "--limit",
+        help="只返回按 id 全局升序排列的前 N 条匹配记录",
     )
     list_parser.set_defaults(handler=cmd_list)
 
