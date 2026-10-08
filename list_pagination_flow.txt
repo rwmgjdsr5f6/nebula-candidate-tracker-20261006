@@ -1,0 +1,321 @@
+================================================================================
+list 候选人编号分页流程说明 —— --after-id 与 --limit 的边界、交集与输出
+================================================================================
+
+生成日期：2026-10-08
+范围：只围绕一条命令的编号分页行为
+        python -m recruiting --db <数据库> list （--position <岗位> | --all-positions）
+              [--after-id <边界>] [--limit <条数>] [其他筛选]
+      讲清三件事：参数从命令行到 JSON 输出的完整路径、--after-id 边界的
+      排除语义与数值规则、连续翻页查询时的一致性与落盘边界。
+依据：仓库内 recruiting/ 源码与 test_list_after_id.py 的静态阅读，
+      加上本次在临时数据库中对公开命令行的实际执行（见第六节）。
+未改动项：本次只新增本文件；产品代码、既有文档、公开命令接口、输出
+      协议及数据库存储格式全部保持原样；实际执行全部在系统临时目录的
+      全新数据库中完成，用后即弃，仓库内未产生任何数据库文件。
+
+结论分级标记：
+  [代码]   可直接在当前源码中定位的结论（附 文件:行号）
+  [测试]   test_list_after_id.py 中存在对应用例/断言；本文件写作时仅静态
+           阅读并指出相关断言位置，本次未运行 unittest，不代表这些测试
+           “已通过”
+  [实跑]   本次会话实际执行公开命令得到的结果（Python 3 / Linux，数据库
+           为 /tmp 下的临时文件；命令以 python3 调用，文档示例按书面约定
+           写作 python）
+  [预期]   由代码与测试静态推出、本次未单独执行的示例结果，不声称已验证
+
+--------------------------------------------------------------------------------
+一、入口与调用链：从 python -m recruiting 到输出 JSON
+--------------------------------------------------------------------------------
+
+1. 命令行入口
+   [代码] recruiting/__main__.py:5-6
+     from recruiting.cli import main
+     if __name__ == "__main__":
+         sys.exit(main())
+   handler 的返回值经 sys.exit 成为进程退出码：成功 0，参数/业务错误 2。
+
+2. main()：解析参数 → 连接数据库 → 分发 → 关闭连接
+   [代码] recruiting/cli.py:833-839
+     args = build_parser().parse_args(argv)   # cli.py:834
+     conn = connect(args.db)                  # cli.py:835
+     try:
+         return args.handler(conn, args)      # cli.py:837
+     finally:
+         conn.close()                         # cli.py:839
+   每次 `python -m recruiting` 都是独立进程、重新 connect 同一文件；
+   connect（cli.py:60-65）执行 SCHEMA（cli.py:10-29）中
+   CREATE TABLE IF NOT EXISTS 的幂等建表并 commit。这是第七节的
+   “连接即可能落盘”与“重启后结果一致”的共同机制基础。
+
+3. list 的参数注册
+   [代码] recruiting/cli.py:733-760：
+   - 岗位范围由互斥且必填的组提供（cli.py:737-743）：--position 与
+     --all-positions 必须恰好提供其一；
+   - --limit（cli.py:752-755）与 --after-id（cli.py:756-759）均为
+     可选、各接收一个字符串值；
+   - 处理函数为 cmd_list（cli.py:760）。
+
+4. cmd_list 全流程（[代码] recruiting/cli.py:156-235），调用链为：
+     各筛选值 strip                        cli.py:157-159、166
+       → --limit 校验 validate_limit       cli.py:178-182（规则在 112-131）
+       → --after-id 校验 validate_after_id cli.py:183-187（规则在 134-153）
+       → 任一字段有错：合并 errors 输出     cli.py:188-190
+       → 拼 SELECT 与 WHERE 交集条件        cli.py:192-224
+       → ORDER BY id ASC                    cli.py:225-226
+       → LIMIT ?                            cli.py:227-231
+       → 执行、按 FIELDS 组装对象、输出     cli.py:232-235
+   全部校验在任何查询之前完成；cmd_list 没有任何写语句。
+
+5. 输出协议
+   [代码] cli.py:233-235：每行查询结果按 FIELDS = ("id", "name",
+   "email", "position", "stage")（cli.py:31）组装为五字段对象，
+   json.dumps(..., ensure_ascii=False) 默认分隔符（": " 与 ", " 处带
+   空格），print 追加恰好一个行尾换行；无命中时输出 []。字段错误经
+   emit_error(errors, compact=True)（cli.py:189 调用 cli.py:68-75，
+   紧凑分隔符在 cli.py:71）输出无多余空白的单行 errors JSON 到
+   stderr。
+
+--------------------------------------------------------------------------------
+二、--after-id 的边界语义：严格排除该编号及更小编号
+--------------------------------------------------------------------------------
+
+1. 边界是“严格大于”，且无需对应现存候选人
+   [代码] cli.py:218-222：
+     if after_id:
+         clauses.append("id > ?")
+         params.append(after_id)
+   生成的条件是 id > 边界：边界编号本身及更小编号全部被排除。条件只是
+   一个比较运算，不要求边界编号在 candidates 表中存在——传入 100、
+   传入末条 id、传入 9223372036854775807 都合法，只是没有 id 更大的
+   记录时结果为 []。
+   [测试] test_list_after_id.py:106-111（test_boundary_is_strictly_
+   exclusive：边界 2 只返回 id 3）、113-118（test_boundary_need_not_
+   match_existing_candidate：边界 100 返回 "[]\n"）、120-125
+   （test_boundary_at_last_id_returns_empty）、127-132
+   （test_max_int64_boundary_returns_empty）；均未运行。
+
+2. 省略 --after-id 与传入 0 等价
+   [代码] validate_after_id 把全零串（"0"、"000" 等）归一为整数 0
+   （cli.py:144-147）；cmd_list 中 `if after_id:`（cli.py:218）对 0
+   为假，不加 id 条件，与 args.after_id 为 None（省略参数，
+   cli.py:183-184）走同一路径。故 0 与省略完全等价。
+   [测试] test_list_after_id.py:134-144（test_zero_same_as_omitted：
+   "0" 与 "000" 都返回全部三人）；未运行。
+
+3. 编号条件与既有筛选取交集，再排序、再截取
+   [代码] id > ? 只是 clauses 中的一个 AND 条件（cli.py:218-222 与其
+   他条件在 cli.py:223-224 以 " AND ".join 合并）；排序固定
+   ORDER BY id ASC（cli.py:225-226，全岗位模式同样全局升序，不按
+   岗位分组）；LIMIT 子句最后追加（cli.py:227-231）。因此语义次序
+   为：全部筛选条件（含编号边界）取交集 → 按 id 全局升序 → 截取前
+   --limit 条。省略 --limit 时不加 LIMIT 子句，返回全部命中；空库或
+   边界越过末条时 fetchall 为空，输出 []（cli.py:232-234）。
+   [测试] test_list_after_id.py:146-152（省略 limit 返回边界后全部）、
+   181-186（test_limit_applies_after_boundary：边界 1 之后 limit 1
+   只取 id 2）、201-215（与 --without-feedback、--stage 的交集）、
+   322-347（空数据库返回 "[]\n"）；均未运行。
+
+--------------------------------------------------------------------------------
+三、两个数值参数的校验规则
+--------------------------------------------------------------------------------
+
+两个参数都在去两端空白后按同一套“ASCII 数字串”规则校验，唯一差别
+是：边界允许零，数量只允许正整数。
+
+1. 共同规则
+   [代码] validate_limit（cli.py:112-131）与 validate_after_id
+   （cli.py:134-153）：
+   - 先 strip() 去两端空白（cli.py:119、141）；
+   - re.fullmatch(r"[0-9]+", ...)（cli.py:120、142）要求整串由
+     ASCII 数字组成：空串、纯空白、负数 "-1"、带正号 "+1"、小数
+     "1.5"、内部空白 "1 2"、非 ASCII 数字（如全角 "１２"）均不匹配；
+   - 允许前导零：lstrip("0") 后归一（cli.py:122、144），"0001" 即 1；
+   - 上限 9223372036854775807（SQLITE_INT64_MAX，cli.py:34-35）：
+     去前导零后位数更多、或位数相同而字典序更大即越界
+     （cli.py:126-130、148-152），9223372036854775808 为 invalid。
+     比较在字符串层面完成，不调用 int()，因此任意长的数字串都不会
+     触发 Python 的转换上限或溢出。
+
+2. 差异：零的处理
+   [代码] --after-id 的全零串归一为边界 0，合法且与省略等价
+   （cli.py:144-147）；--limit 的全零串不是正整数，直接 invalid
+   （cli.py:122-125）。即边界允许零，数量只允许正整数。
+   [测试] test_list_after_id.py:134-144（边界 "0"/"000" 等价省略）；
+   未运行。
+
+3. 非法值的报告方式：按字段合并为单行紧凑 errors JSON
+   [代码] limit 校验失败记 errors["limit"] = "invalid"
+   （cli.py:178-182），after_id 校验失败记 errors["after_id"] =
+   "invalid"（cli.py:183-187）；两项互不短路，且与同次其他字段错误
+   （position、name、email、stage）合并进同一个 errors 对象，经
+   emit_error(errors, compact=True) 输出单行紧凑 JSON 到 stderr
+   （cli.py:188-190 → 68-75），随后 return 2。此时 stdout 为空、
+   退出码 2，且不执行任何查询。
+   [实跑] 本次在临时库执行
+     list --all-positions --after-id x --limit 0 --stage offer
+   得到：退出码 2，stdout 为空，stderr 恰好一行：
+     {"errors":{"stage":"invalid","limit":"invalid","after_id":"invalid"}}
+   [测试] test_list_after_id.py:226-240（test_invalid_after_id_values
+   的非法输入矩阵，断言 stderr 逐字为
+   '{"errors":{"after_id":"invalid"}}\n'）、242-259
+   （test_after_id_error_merges_with_other_field_errors，断言三字段
+   合并且 stderr 单行）、261-277（与 position/email 错误合并）；
+   除上述实跑的一条合并示例外，其余未运行。
+
+4. 用法错误：缺范围、并用两范围、缺数值参数的值
+   [代码] 三种情况都由 argparse 在 parse_args（cli.py:834）阶段处
+   理，handler 不会执行：
+   - 未提供 --position 也未提供 --all-positions：互斥组 required=True
+     （cli.py:737）；
+   - 两者同时提供：同一互斥组（cli.py:737-743）；
+   - --after-id 或 --limit 未给值：两选项均要求一个值
+     （cli.py:752-759）。
+   argparse 向 stderr 输出以 "usage:" 开头的用法说明并以退出码 2
+   结束，stdout 为空；这不是 errors JSON。用法文本措辞随 Python
+   版本可能不同。
+   [测试] test_list_after_id.py:281-285（--after-id 缺值）、287-291
+   （缺范围）、293-300（并用两范围），均断言退出码 2、stdout 空、
+   stderr 含 "usage:"；未运行。
+
+--------------------------------------------------------------------------------
+四、固定样例与两次独立进程的分页查询
+--------------------------------------------------------------------------------
+
+样例沿用 test_list_after_id.py 的固定合成夹具（setUp 在
+test_list_after_id.py:34-50，评价在 :48）：
+
+  id 1  林晓  lin@example.test   测试工程师  applied  （已有评价）
+  id 2  周宁  zhou@example.test  测试工程师  applied  （无评价）
+  id 3  陈禾  chen@example.test  开发工程师  applied  （无评价）
+
+建立夹具的命令（书面写法，数据库路径以 demo.sqlite3 为例）：
+  python -m recruiting --db demo.sqlite3 add \
+    --name "林晓" --email lin@example.test --position "测试工程师"
+  python -m recruiting --db demo.sqlite3 add \
+    --name "周宁" --email zhou@example.test --position "测试工程师"
+  python -m recruiting --db demo.sqlite3 add \
+    --name "陈禾" --email chen@example.test --position "开发工程师"
+  python -m recruiting --db demo.sqlite3 add-feedback --id 1 --text "林晓的评价"
+
+分页条件：全岗位（--all-positions）、无评价（--without-feedback）、
+每页一条（--limit 1）。无评价者为 id 2、3，故第一页是周宁、第二页
+是陈禾。两次查询是两个独立进程对同一数据库的调用。
+
+第一页（不带边界）：
+  python -m recruiting --db demo.sqlite3 list \
+    --all-positions --without-feedback --limit 1
+[实跑] 退出码 0，stderr 为空，stdout 单行：
+  [{"id": 2, "name": "周宁", "email": "zhou@example.test", "position": "测试工程师", "stage": "applied"}]
+
+第二页（以上一页末条 id 2 为边界）：
+  python -m recruiting --db demo.sqlite3 list \
+    --all-positions --without-feedback --after-id 2 --limit 1
+[实跑] 退出码 0，stderr 为空，stdout 单行：
+  [{"id": 3, "name": "陈禾", "email": "chen@example.test", "position": "开发工程师", "stage": "applied"}]
+
+说明：
+- 两条命令各自是独立进程，第二次重新连接同一数据库文件；
+- 各对象仍含 id、name、email、position、stage 五个字段（FIELDS，
+  cli.py:31；组装在 cli.py:233）；
+- 若继续以 id 3 为边界取第三页，[预期] 返回 []（无更大 id 的无评价
+  记录），退出码仍为 0；该示例本次未单独执行。
+- [测试] 等价场景见 test_list_after_id.py:201-215
+  （test_intersects_with_stage_and_without_feedback：无评价交集后
+  边界 1 得 id 2、3，limit 1 只取 id 2）；未运行。
+
+--------------------------------------------------------------------------------
+五、一致性、重启与“只读不等于完全不落盘”
+--------------------------------------------------------------------------------
+
+1. 数据未变化时，重启后结果一致
+   [代码] 每次调用都是新进程重新 connect 同一文件（cli.py:835），
+   查询结果完全由数据库当前内容决定；没有进程内缓存。两次相同查询
+   在数据未变时输出逐字相同。
+   [测试] test_list_after_id.py:314-319
+   （test_results_consistent_across_restarts：两次独立调用同一查询，
+   断言 stdout 完全一致）；未运行。
+
+2. 每次查询读取当前数据，不保证跨查询快照
+   [代码] cmd_list 的 SELECT（cli.py:232）在执行时读取数据库当前
+   状态；两次独立调用之间若有其他进程增删改候选人或评价，第二次
+   查询看到的就是变化后的数据。--after-id 翻页是“以上一页末条 id
+   为边界再查一次”，不是对某一时刻快照的续读：翻页期间新增的更
+   大 id 记录会出现在后续页，被删除的记录会从后续页消失。需要严格
+   一致的分页结果时，应自行保证翻页期间数据不变。
+
+3. 连接数据库仍可能创建文件和缺失的表
+   [代码] connect（cli.py:60-65）先 sqlite3.connect(args.db)——
+   路径不存在时会创建空的数据库文件；再 executescript(SCHEMA)
+   （cli.py:63，CREATE TABLE IF NOT EXISTS，cli.py:10-29）并
+   commit（cli.py:64）。因此即使是一次“只读”的 list，对一个尚不
+   存在的路径也会在磁盘上留下新文件，对缺少表的已有文件会写入表
+   结构。“list 不改动业务记录”指的是不 INSERT/UPDATE/DELETE 任何
+   候选人、阶段历史或评价行（cmd_list 全文 cli.py:156-235 无写
+   语句），不应理解为完全不落盘。
+   [测试] test_list_after_id.py:304-312
+   （test_success_and_failure_queries_do_not_modify_data：一串成功
+   与失败查询前后，list --all-positions 快照一致）、322-347（对全新
+   路径的空库查询返回 "[]\n"，该查询本身即伴随建库建表）；未运行。
+
+--------------------------------------------------------------------------------
+六、本次实际执行记录
+--------------------------------------------------------------------------------
+
+[实跑] 本次会话在 /tmp 临时目录新建数据库，按第四节命令建夹具后
+实际执行了：第一页查询、第二页查询（结果逐字见第四节，退出码均
+为 0、stderr 均为空），以及一条三字段错误合并示例（结果见第三
+节第 3 点）。命令以 python3 调用（本机环境无 python 别名，python
+为书面写法）；临时数据库用后已删除，仓库工作树未被这些执行写入
+任何文件。第四节的第三页 [] 与第三节非法输入矩阵等其余示例为
+[预期]，本次未单独执行；unittest 测试套件本次未运行。
+
+--------------------------------------------------------------------------------
+七、关键证据索引（文件:行号）
+--------------------------------------------------------------------------------
+
+recruiting/__main__.py:5-6      命令行入口、sys.exit(main())
+recruiting/cli.py:10-29         SCHEMA：三张表 IF NOT EXISTS 幂等建表
+recruiting/cli.py:31            FIELDS：输出对象的五个字段
+recruiting/cli.py:34-35         SQLITE_INT64_MAX = 9223372036854775807
+recruiting/cli.py:60-65         connect：打开/创建库、幂等建表并 commit
+recruiting/cli.py:68-75         emit_error：errors JSON → stderr；
+                                :71 紧凑分隔符（list 参数错误用）
+recruiting/cli.py:112-131       validate_limit：strip、ASCII 数字、
+                                前导零、上限、拒绝全零（:122-125）
+recruiting/cli.py:134-153       validate_after_id：同上但全零归一为
+                                边界 0（:144-147）
+recruiting/cli.py:156-235       cmd_list 全流程：
+                                157-159 筛选值 strip；
+                                178-182 limit 校验并入 errors；
+                                183-187 after_id 校验并入 errors；
+                                188-190 合并错误紧凑输出、return 2；
+                                192-224 WHERE 交集（218-222 id > ?）；
+                                225-226 ORDER BY id ASC；
+                                227-231 LIMIT ?；232-235 执行与输出
+recruiting/cli.py:733-760       list 参数注册：737-743 范围互斥必填组；
+                                752-755 --limit；756-759 --after-id
+recruiting/cli.py:833-839       main：解析、连接、分发、finally 关闭
+test_list_after_id.py:34-50     固定夹具：林晓 1（有评价）、周宁 2、
+                                陈禾 3（均无评价）
+test_list_after_id.py:106-111   边界严格排除：--after-id 2 只返回 id 3
+test_list_after_id.py:113-118   边界无需对应现存候选人（100 → []）
+test_list_after_id.py:120-125   边界在末条 id 上 → []
+test_list_after_id.py:127-132   边界取 int64 上限 → []
+test_list_after_id.py:134-144   "0"/"000" 与省略等价
+test_list_after_id.py:146-152   省略 --limit 返回边界后全部命中
+test_list_after_id.py:154-161   前导零 "0001" 合法
+test_list_after_id.py:163-170   两端空白被去除
+test_list_after_id.py:181-186   limit 在边界之后截取
+test_list_after_id.py:201-215   与 --without-feedback、--stage 交集
+test_list_after_id.py:226-240   after_id 非法输入矩阵 → 紧凑 errors
+test_list_after_id.py:242-259   after_id/limit/stage 错误合并为单行
+test_list_after_id.py:261-277   与 position/email 错误合并
+test_list_after_id.py:281-300   缺值、缺范围、并用两范围的用法错误
+test_list_after_id.py:304-312   成功与失败查询均不改动数据
+test_list_after_id.py:314-319   两次独立调用结果一致（重启一致性）
+test_list_after_id.py:322-347   空数据库配合 --after-id 返回 []
+
+================================================================================
+说明结束
+================================================================================
