@@ -109,19 +109,23 @@ def cmd_add(conn, args):
     return 0
 
 
-def validate_limit(raw_limit):
-    """list 的 --limit 去两端空白后的规则：须为 ASCII 数字组成的正整数。
+def validate_list_number(raw_value, allow_zero):
+    """list 数值参数（--limit 与 --after-id）去两端空白后的共用规则。
 
-    允许前导零，上限为 9223372036854775807；显式空值、纯空白、全零、
-    负数、带正号、小数、非 ASCII 数字或超出上限均返回
-    ("invalid", None)，合法时返回 (None, 对应整数)。
+    只接受 ASCII 数字，允许前导零，上限为 9223372036854775807；显式空值、
+    纯空白、负数、带正号、小数、内部空白、非 ASCII 数字或超出上限均返回
+    ("invalid", None)，合法时返回 (None, 对应整数)。两个参数唯一的区别在
+    全零值（含 "0" 与任意多个 "0"）：allow_zero 为 False 时（--limit）不是
+    正整数，返回 ("invalid", None)；为 True 时（--after-id）即边界 0，
+    返回 (None, 0)，与省略参数等价。
     """
-    limit = raw_limit.strip()
-    if not re.fullmatch(r"[0-9]+", limit):
+    value = raw_value.strip()
+    if not re.fullmatch(r"[0-9]+", value):
         return "invalid", None
-    digits = limit.lstrip("0")
+    digits = value.lstrip("0")
     if not digits:
-        # 全零（含 "0" 与任意多个 "0"）不是正整数。
+        if allow_zero:
+            return None, 0
         return "invalid", None
     if len(digits) > len(_SQLITE_INT64_MAX_DIGITS) or (
         len(digits) == len(_SQLITE_INT64_MAX_DIGITS)
@@ -129,28 +133,16 @@ def validate_limit(raw_limit):
     ):
         return "invalid", None
     return None, int(digits)
+
+
+def validate_limit(raw_limit):
+    """list 的 --limit 规则：共用数值校验，全零值不是正整数，为 invalid。"""
+    return validate_list_number(raw_limit, allow_zero=False)
 
 
 def validate_after_id(raw_after_id):
-    """list 的 --after-id 去两端空白后的规则：须为 ASCII 数字组成的非负整数。
-
-    允许前导零，上限为 9223372036854775807；0 与省略参数等价。显式空值、
-    纯空白、负数、带正号、小数、内部空白、非 ASCII 数字或超出上限均返回
-    ("invalid", None)，合法时返回 (None, 对应整数)。
-    """
-    after_id = raw_after_id.strip()
-    if not re.fullmatch(r"[0-9]+", after_id):
-        return "invalid", None
-    digits = after_id.lstrip("0")
-    if not digits:
-        # 全零（含 "0" 与任意多个 "0"）即边界 0，与省略参数等价。
-        return None, 0
-    if len(digits) > len(_SQLITE_INT64_MAX_DIGITS) or (
-        len(digits) == len(_SQLITE_INT64_MAX_DIGITS)
-        and digits > _SQLITE_INT64_MAX_DIGITS
-    ):
-        return "invalid", None
-    return None, int(digits)
+    """list 的 --after-id 规则：共用数值校验，全零值即边界 0，与省略等价。"""
+    return validate_list_number(raw_after_id, allow_zero=True)
 
 
 def cmd_list(conn, args):
