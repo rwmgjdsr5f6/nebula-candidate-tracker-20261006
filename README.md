@@ -31,6 +31,10 @@ python -m recruiting --db demo.sqlite3 list --all-positions --without-feedback
 python -m recruiting --db demo.sqlite3 list --all-positions --limit 2
 python -m recruiting --db demo.sqlite3 list --position "测试工程师" --without-feedback --limit 1
 
+# 以上一次结果最后一位候选人的编号为界继续翻页（可选，两种范围模式均支持）
+python -m recruiting --db demo.sqlite3 list --position "测试工程师" --limit 1 --after-id 1
+python -m recruiting --db demo.sqlite3 list --all-positions --after-id 3
+
 # 按 id 修改候选人阶段（applied/interviewing/hired/rejected 均可互转）
 python -m recruiting --db demo.sqlite3 set-stage --id 1 --stage interviewing
 
@@ -98,6 +102,24 @@ ASCII 数字或超出上限均返回 `limit` 的 `invalid`。字段错误沿用 
 （与其他字段错误合并进同一个紧凑 `errors` 对象，标准错误单行、标准输出
 为空、退出码 2）；缺少 `--limit` 的值按命令行用法错误结束（标准错误为
 用法说明、标准输出为空、退出码 2）。
+
+两种范围模式还都支持可选的 `--after-id 编号`，用于以上一次结果中最后一位
+候选人的编号为界继续查看后续记录：省略时与以往完全一致；提供时只返回 id
+严格大于该编号、且满足其余全部筛选条件的记录，再与姓名、邮箱、阶段及
+`--without-feedback` 等条件取交集，最后按 id 全局升序应用 `--limit`
+（`--limit` 同样省略时返回边界之后的全部匹配记录）。单岗位与
+`--all-positions` 两种范围都支持，边界按全局 id 判定、不按岗位分组，因此
+边界编号属于其他岗位也能正确越过；同名或同邮箱的不同候选人仍分别保留。
+边界编号无需对应现存候选人，不存在的编号也正常查询；边界为最后一条匹配
+记录的编号或 9223372036854775807 时返回 `[]`，空数据库也返回 `[]`。编号
+去除两端空白后须为 ASCII 数字组成的非负整数，允许前导零，`0`（含任意多个
+`0`）与省略该参数结果相同，最大为 9223372036854775807；显式空值、纯空白、
+负数、带正号、小数、内部空白、非 ASCII 数字或超出上限均返回 `after_id` 的
+`invalid`。字段错误沿用 list 协议（与其他筛选参数及 `limit` 的字段错误合并
+进同一个紧凑 `errors` 对象，标准错误单行、标准输出为空、退出码 2）；缺少
+`--after-id` 的值按命令行用法错误结束（标准错误为用法说明、标准输出为空、
+退出码 2）。查询不增加分页元数据，结果仍为单行 JSON 数组与候选人五字段
+对象，标准错误为空、退出码为 0，且不改动任何记录或统计。
 
 `set-stage` 的阶段去除两端空白后按小写精确匹配，须为
 `applied`、`interviewing`、`hired`、`rejected` 之一：为空返回

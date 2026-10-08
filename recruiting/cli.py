@@ -131,6 +131,29 @@ def validate_limit(raw_limit):
     return None, int(digits)
 
 
+def validate_after_id(raw_after_id):
+    """list 的 --after-id 去两端空白后的规则：须为 ASCII 数字组成的非负整数。
+
+    允许前导零与 0（传 0 与省略参数效果相同），上限为
+    9223372036854775807；显式空值、纯空白、负数、带正号、小数、内部
+    空白、非 ASCII 数字或超出上限均返回 ("invalid", None)，合法时返回
+    (None, 对应整数)。边界编号无需对应现存候选人。
+    """
+    after_id = raw_after_id.strip()
+    if not re.fullmatch(r"[0-9]+", after_id):
+        return "invalid", None
+    digits = after_id.lstrip("0")
+    if not digits:
+        # 全零（含 "0" 与任意多个 "0"）即边界 0，与省略参数等价。
+        return None, 0
+    if len(digits) > len(_SQLITE_INT64_MAX_DIGITS) or (
+        len(digits) == len(_SQLITE_INT64_MAX_DIGITS)
+        and digits > _SQLITE_INT64_MAX_DIGITS
+    ):
+        return "invalid", None
+    return None, int(digits)
+
+
 def cmd_list(conn, args):
     stage = args.stage.strip() if args.stage is not None else None
     email = args.email.strip() if args.email is not None else None
@@ -158,6 +181,11 @@ def cmd_list(conn, args):
         limit_error, limit = validate_limit(args.limit)
         if limit_error is not None:
             errors["limit"] = limit_error
+    after_id = None
+    if args.after_id is not None:
+        after_id_error, after_id = validate_after_id(args.after_id)
+        if after_id_error is not None:
+            errors["after_id"] = after_id_error
     if errors:
         emit_error(errors, compact=True)
         return 2
@@ -165,6 +193,11 @@ def cmd_list(conn, args):
     sql = "SELECT id, name, email, position, stage FROM candidates"
     clauses = []
     params = []
+    if after_id is not None:
+        # 只返回 id 严格大于边界编号的记录；边界编号无需对应现存候选人。
+        # 与其余筛选条件一样先取交集，再统一按 id 全局升序应用 limit。
+        clauses.append("id > ?")
+        params.append(after_id)
     if position is not None:
         clauses.append("position = ?")
         params.append(position)
@@ -720,6 +753,10 @@ def build_parser():
     list_parser.add_argument(
         "--limit",
         help="只返回按 id 全局升序排列的前 N 条匹配记录",
+    )
+    list_parser.add_argument(
+        "--after-id",
+        help="只返回 id 严格大于该编号的匹配记录，按 id 全局升序继续翻页",
     )
     list_parser.set_defaults(handler=cmd_list)
 
