@@ -131,6 +131,28 @@ def validate_limit(raw_limit):
     return None, int(digits)
 
 
+def validate_after_id(raw_after_id):
+    """list 的 --after-id 去两端空白后的规则：须为 ASCII 数字组成的非负整数。
+
+    允许前导零，上限为 9223372036854775807；0 与省略参数等价。显式空值、
+    纯空白、负数、带正号、小数、内部空白、非 ASCII 数字或超出上限均返回
+    ("invalid", None)，合法时返回 (None, 对应整数)。
+    """
+    after_id = raw_after_id.strip()
+    if not re.fullmatch(r"[0-9]+", after_id):
+        return "invalid", None
+    digits = after_id.lstrip("0")
+    if not digits:
+        # 全零（含 "0" 与任意多个 "0"）即边界 0，与省略参数等价。
+        return None, 0
+    if len(digits) > len(_SQLITE_INT64_MAX_DIGITS) or (
+        len(digits) == len(_SQLITE_INT64_MAX_DIGITS)
+        and digits > _SQLITE_INT64_MAX_DIGITS
+    ):
+        return "invalid", None
+    return None, int(digits)
+
+
 def cmd_list(conn, args):
     stage = args.stage.strip() if args.stage is not None else None
     email = args.email.strip() if args.email is not None else None
@@ -158,6 +180,11 @@ def cmd_list(conn, args):
         limit_error, limit = validate_limit(args.limit)
         if limit_error is not None:
             errors["limit"] = limit_error
+    after_id = None
+    if args.after_id is not None:
+        after_id_error, after_id = validate_after_id(args.after_id)
+        if after_id_error is not None:
+            errors["after_id"] = after_id_error
     if errors:
         emit_error(errors, compact=True)
         return 2
@@ -188,6 +215,11 @@ def cmd_list(conn, args):
             "SELECT 1 FROM feedback WHERE feedback.candidate_id = candidates.id"
             ")"
         )
+    if after_id:
+        # 编号边界与其他筛选条件取交集：只保留 id 严格大于边界的记录，
+        # 边界编号无需对应现存候选人；0 与省略参数等价，不加条件。
+        clauses.append("id > ?")
+        params.append(after_id)
     if clauses:
         sql += " WHERE " + " AND ".join(clauses)
     # 全岗位模式同样按 id 全局升序，不按岗位分组。
@@ -720,6 +752,10 @@ def build_parser():
     list_parser.add_argument(
         "--limit",
         help="只返回按 id 全局升序排列的前 N 条匹配记录",
+    )
+    list_parser.add_argument(
+        "--after-id",
+        help="只返回 id 严格大于所给编号的匹配记录，再按 id 全局升序应用 --limit",
     )
     list_parser.set_defaults(handler=cmd_list)
 
